@@ -174,8 +174,9 @@
 
   /** Save the whole form to storage. */
   async function onSave() {
-    fieldMapState = collect().fieldMap;
-    await saveSettings(collect());
+    const s = collect();
+    fieldMapState = s.fieldMap;
+    await saveSettings(s);
     setStatus('Saved.', 'ok');
     setTimeout(() => setStatus('', ''), 2000);
   }

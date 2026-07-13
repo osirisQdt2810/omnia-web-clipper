@@ -90,6 +90,11 @@
     } catch (_e) {
       // The context may already be torn down (chrome.* unusable) — nothing left to detach.
     }
+    try {
+      chrome.storage.onChanged.removeListener(onStorageChanged);
+    } catch (_e) {
+      // The context may already be torn down (chrome.* unusable) — nothing left to detach.
+    }
   }
 
   const RELOAD_MSG = 'Omnia was updated — reload this page (F5) to keep clipping.';
@@ -120,15 +125,18 @@
     }
   }
 
+  /** storage.onChanged handler (named so handleContextGone can removeListener it). */
+  function onStorageChanged(changes, area) {
+    if (area !== 'sync') {
+      return;
+    }
+    if (changes.enabled || changes.mouseEnabled) {
+      refreshFlags();
+    }
+  }
+
   if (chrome.storage && chrome.storage.onChanged) {
-    chrome.storage.onChanged.addListener((changes, area) => {
-      if (area !== 'sync') {
-        return;
-      }
-      if (changes.enabled || changes.mouseEnabled) {
-        refreshFlags();
-      }
-    });
+    chrome.storage.onChanged.addListener(onStorageChanged);
   }
 
   // -------------------------------------------------------------------------

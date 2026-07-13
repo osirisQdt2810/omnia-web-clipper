@@ -237,10 +237,6 @@ if (chrome.runtime.onStartup) {
   });
 }
 
-// Runs on every service-worker start (including right after a reload, when onInstalled does NOT
-// fire) so open tabs get a live content script without a manual page refresh.
-reinjectContentScript();
-
 if (chrome.contextMenus) {
   chrome.contextMenus.onClicked.addListener((info, tab) => {
     if (info.menuItemId !== CONTEXT_MENU_ID || !tab || tab.id === undefined) {
