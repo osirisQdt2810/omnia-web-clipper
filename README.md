@@ -3,9 +3,10 @@
 A **Chrome/Edge (Manifest V3) extension** that captures a **word or phrase plus its
 sentence/context** from any web page and sends it to your running Anki via
 [AnkiConnect](https://ankiweb.net/shared/info/2055492159) — where the
-[Omnia](../../README.md) add-on's **Smart Notes / integration gateway** auto-generates the rest
-of the card. It is the browser sibling of the [Omnia Desktop Clipper](../omnia-desktop-clipper/)
-and speaks the same AnkiConnect contract.
+[Omnia](https://github.com/osirisQdt2810/omnia) add-on's **Smart Notes / integration gateway**
+auto-generates the rest of the card. It is the browser sibling of the
+[Omnia Desktop Clipper](https://github.com/osirisQdt2810/omnia-desktop-clipper) and speaks the
+same AnkiConnect contract.
 
 - **Double-click** a word (or **select** a phrase) on any page → a floating **"+"** appears.
 - Click it → the word + the surrounding sentence are read from the page DOM and sent to Anki.
@@ -25,6 +26,18 @@ To build a distributable zip instead, run `./package.sh` (produces a packaged ex
 drag onto `chrome://extensions`).
 
 > The extension needs no build step — it is plain MV3 JS/HTML.
+
+### On each of your machines
+Repeat the four steps above on every computer (the extension is per-browser-profile). Two ways to
+avoid re-doing it by hand:
+- **Chrome Sync** — sign into Chrome with the same Google account and an installed extension
+  follows you; or
+- **Publish once as an _Unlisted_ Chrome Web Store item** and open the install link on each machine.
+
+An unpacked install gets a **random extension ID per machine**, so its `chrome-extension://<id>`
+origin differs everywhere. If you whitelist the ID (the strict CORS option below) rather than `*`,
+**pin the ID** with a manifest `"key"` so it is identical on every machine and you configure
+AnkiConnect only once.
 
 ---
 
