@@ -116,9 +116,9 @@ The clipper tags each note with its **source tag `omnia-web-clipper`** plus **`o
 ```
 
 The Omnia add-on ships a `web_clipper` integration keyed on that source tag; enable its toggle
-under **Omnia → Smart Notes → Integrations**. The add-on's gateway then auto-generates the card
-from the base word + context. (The desktop clipper uses `omnia-desktop-clipper` with its own
-toggle.)
+in **Tools → Omnia**, then open the **Smart Notes** plugin's **Configure** → **Integrations** tab.
+The add-on's gateway then auto-generates the card from the base word + context. (The desktop
+clipper uses `omnia-desktop-clipper` with its own toggle.)
 
 ---
 
@@ -128,8 +128,8 @@ toggle.)
   `webCorsOriginList` (see AnkiConnect setup). Restart Anki after editing its config.
 - **"cannot create note because it is empty"** → the note type's first field wasn't mapped; the
   clipper auto-fills it with the word, but double-check the field map in Options.
-- **No card fields generated** → enable the *Omnia Web Clipper* integration in
-  Omnia → Smart Notes → Integrations, and configure Smart Notes for that note type.
+- **No card fields generated** → enable the *Omnia Web Clipper* integration in **Tools → Omnia →
+  Smart Notes → Configure → Integrations**, and configure Smart Notes for that note type.
 - **"+" doesn't appear** → the extension can't inject into some pages (e.g. `chrome://` pages, the
   Web Store, PDFs opened in the built-in viewer). Reload the page after installing/updating.
 
