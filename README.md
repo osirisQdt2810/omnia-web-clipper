@@ -22,8 +22,9 @@ same AnkiConnect contract.
 3. **Load unpacked** → select this `omnia-web-clipper/` folder.
 4. Pin the **Omnia Web Clipper** icon if you like (puzzle-piece menu → pin).
 
-To build a distributable zip instead, run `./package.sh` (produces a packaged extension you can
-drag onto `chrome://extensions`).
+To build a distributable zip instead, run `./package.sh` — it produces an upload-ready zip for the
+Chrome Web Store (see the distribution notes). Chrome can't sideload a raw `.zip` by drag-and-drop;
+to sideload, unzip it and use **Load unpacked** on the extracted folder.
 
 > The extension needs no build step — it is plain MV3 JS/HTML.
 
