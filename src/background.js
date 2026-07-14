@@ -216,7 +216,9 @@ async function reinjectContentScript() {
         continue;
       }
       chrome.scripting
-        .executeScript({target: {tabId: tab.id}, files: ['content.js']})
+        // executeScript's `files` are resolved from the EXTENSION ROOT (unlike importScripts,
+        // which is service-worker-relative), so the src/ prefix is required after the refactor.
+        .executeScript({target: {tabId: tab.id}, files: ['src/content.js']})
         .catch(() => {});
     }
   } catch (_e) {
