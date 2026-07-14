@@ -3,9 +3,10 @@
 A **Chrome/Edge (Manifest V3) extension** that captures a **word or phrase plus its
 sentence/context** from any web page and sends it to your running Anki via
 [AnkiConnect](https://ankiweb.net/shared/info/2055492159) — where the
-[Omnia](../../README.md) add-on's **Smart Notes / integration gateway** auto-generates the rest
-of the card. It is the browser sibling of the [Omnia Desktop Clipper](../omnia-desktop-clipper/)
-and speaks the same AnkiConnect contract.
+[Omnia](https://github.com/osirisQdt2810/omnia) add-on's **Smart Notes / integration gateway**
+auto-generates the rest of the card. It is the browser sibling of the
+[Omnia Desktop Clipper](https://github.com/osirisQdt2810/omnia-desktop-clipper) and speaks the
+same AnkiConnect contract.
 
 - **Double-click** a word (or **select** a phrase) on any page → a floating **"+"** appears.
 - Click it → the word + the surrounding sentence are read from the page DOM and sent to Anki.
@@ -21,10 +22,23 @@ and speaks the same AnkiConnect contract.
 3. **Load unpacked** → select this `omnia-web-clipper/` folder.
 4. Pin the **Omnia Web Clipper** icon if you like (puzzle-piece menu → pin).
 
-To build a distributable zip instead, run `./package.sh` (produces a packaged extension you can
-drag onto `chrome://extensions`).
+To build a distributable zip instead, run `./package.sh` — it produces an upload-ready zip for the
+Chrome Web Store (see the distribution notes). Chrome can't sideload a raw `.zip` by drag-and-drop;
+to sideload, unzip it and use **Load unpacked** on the extracted folder.
 
 > The extension needs no build step — it is plain MV3 JS/HTML.
+
+### On each of your machines
+Repeat the four steps above on every computer (the extension is per-browser-profile). Two ways to
+avoid re-doing it by hand:
+- **Chrome Sync** — sign into Chrome with the same Google account and an installed extension
+  follows you; or
+- **Publish once as an _Unlisted_ Chrome Web Store item** and open the install link on each machine.
+
+An unpacked install gets a **random extension ID per machine**, so its `chrome-extension://<id>`
+origin differs everywhere. If you whitelist the ID (the strict CORS option below) rather than `*`,
+**pin the ID** with a manifest `"key"` so it is identical on every machine and you configure
+AnkiConnect only once.
 
 ---
 
@@ -102,9 +116,9 @@ The clipper tags each note with its **source tag `omnia-web-clipper`** plus **`o
 ```
 
 The Omnia add-on ships a `web_clipper` integration keyed on that source tag; enable its toggle
-under **Omnia → Smart Notes → Integrations**. The add-on's gateway then auto-generates the card
-from the base word + context. (The desktop clipper uses `omnia-desktop-clipper` with its own
-toggle.)
+in **Tools → Omnia**, then open the **Smart Notes** plugin's **Configure** → **Integrations** tab.
+The add-on's gateway then auto-generates the card from the base word + context. (The desktop
+clipper uses `omnia-desktop-clipper` with its own toggle.)
 
 ---
 
@@ -114,8 +128,8 @@ toggle.)
   `webCorsOriginList` (see AnkiConnect setup). Restart Anki after editing its config.
 - **"cannot create note because it is empty"** → the note type's first field wasn't mapped; the
   clipper auto-fills it with the word, but double-check the field map in Options.
-- **No card fields generated** → enable the *Omnia Web Clipper* integration in
-  Omnia → Smart Notes → Integrations, and configure Smart Notes for that note type.
+- **No card fields generated** → enable the *Omnia Web Clipper* integration in **Tools → Omnia →
+  Smart Notes → Configure → Integrations**, and configure Smart Notes for that note type.
 - **"+" doesn't appear** → the extension can't inject into some pages (e.g. `chrome://` pages, the
   Web Store, PDFs opened in the built-in viewer). Reload the page after installing/updating.
 
