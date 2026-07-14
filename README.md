@@ -32,16 +32,32 @@ drag onto `chrome://extensions`).
 
 1. Install **AnkiConnect** in Anki (add-on code `2055492159`) and **restart Anki**.
 2. Keep **Anki running** while you clip.
-3. **Allow the extension's origin in AnkiConnect (CORS).** Unlike the desktop app, a browser
-   extension IS subject to AnkiConnect's `webCorsOriginList`. In Anki:
-   **Tools → Add-ons → AnkiConnect → Config**, and add your extension origin, e.g.:
+3. **Let AnkiConnect accept the extension's origin.** The desktop app works with no config because
+   `urllib` sends **no `Origin` header**, and AnkiConnect allows origin-less requests. A browser
+   always attaches `Origin: chrome-extension://<id>`, so AnkiConnect's `webCorsOriginList` gate
+   applies. (The clipper calls AnkiConnect from its *service worker*, which — with the
+   `host_permissions` this manifest declares — is exempt from *Chrome-side* CORS; the only gate left
+   is AnkiConnect's own allowlist.) So you must change AnkiConnect config in **one** of two ways
+   (**Tools → Add-ons → AnkiConnect → Config**, then restart Anki):
 
-   ```json
-   { "webCorsOriginList": ["http://localhost", "chrome-extension://<YOUR_EXTENSION_ID>"] }
-   ```
+   - **Simplest, ID-free (recommended for local use):** allow any origin. AnkiConnect binds to
+     `127.0.0.1` only, so a remote page still can't reach it.
 
-   Find `<YOUR_EXTENSION_ID>` on `chrome://extensions` (under the extension). Restart Anki after
-   editing. If the origin isn't allowed, the clipper shows an actionable error pointing here.
+     ```json
+     { "webCorsOriginList": ["http://localhost", "*"] }
+     ```
+
+   - **Strict:** whitelist this one extension. You do *not* have to use the ID if you prefer `*`;
+     the ID is only for pinning down exactly one extension:
+
+     ```json
+     { "webCorsOriginList": ["http://localhost", "chrome-extension://<YOUR_EXTENSION_ID>"] }
+     ```
+
+     Find `<YOUR_EXTENSION_ID>` on `chrome://extensions`. Note it **changes on every unpacked
+     re-install** unless you pin it with a manifest `"key"`; for dev use, `*` avoids that churn.
+
+   If the origin isn't allowed, the clipper shows an actionable error pointing here.
 4. If you set an AnkiConnect **`apiKey`**, enter the same key in the extension **Options**.
 
 ---
@@ -109,12 +125,14 @@ toggle.)
 
 ```
 omnia-web-clipper/
-├── manifest.json     # MV3 manifest (permissions, host_permissions, background/content)
-├── background.js     # service worker: context menu + the addNote flow to AnkiConnect
-├── content.js        # in-page: double-click/select detection, floating "+", context read
-├── shared.js         # AnkiConnect fetch helper + error messages
-├── options.html/js   # options page (deck/note-type/field-map/tags/autogen/url/key)
-├── popup.html/js     # toolbar popup (status + enable toggle)
-├── icons/            # extension icons
-└── package.sh        # build a distributable zip
+├── manifest.json         # MV3 manifest (must stay at the root; paths point into src/ + assets/)
+├── src/
+│   ├── background.js     # service worker: context menu + the addNote flow to AnkiConnect
+│   ├── content.js        # in-page: double-click/select detection, floating "+", context read
+│   ├── shared.js         # AnkiConnect fetch helper + error messages
+│   ├── options.html/js   # options page (deck/note-type/field-map/tags/autogen/url/key)
+│   └── popup.html/js     # toolbar popup (status + enable toggle)
+├── assets/
+│   └── icons/            # extension icons
+└── package.sh            # build a distributable zip
 ```
