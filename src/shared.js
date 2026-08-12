@@ -15,6 +15,10 @@
   // send this capture key".
   const DEFAULTS = {
     ankiConnectUrl: 'http://127.0.0.1:8765',
+    // Where the Omnia add-on's "Word Lookup" service listens. Its own loopback port, separate
+    // from AnkiConnect, and reached from the background worker (see background.js lookupWord).
+    lookupUrl: 'http://127.0.0.1:8766',
+    lookupEnabled: true, // Show the magnifier next to the "+".
     apiKey: '', // AnkiConnect "apiKey" option; empty when AnkiConnect apiKey is null.
     enabled: true, // Master on/off. When false, no "+" and no context-menu action.
     mouseEnabled: true, // Double-click "+" tooltip on/off (the right-click menu is unaffected).

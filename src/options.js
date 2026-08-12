@@ -132,6 +132,8 @@
 
     el('enabledToggle').setAttribute('aria-checked', String(s.enabled !== false));
     el('mouseToggle').setAttribute('aria-checked', String(s.mouseEnabled !== false));
+    el('lookupToggle').setAttribute('aria-checked', String(s.lookupEnabled !== false));
+    el('lookupUrl').value = s.lookupUrl || 'http://127.0.0.1:8766';
     el('autogen').checked = s.autogen !== false;
 
     // Seed the dropdowns with the stored values so the page is usable even
@@ -163,6 +165,8 @@
       apiKey: el('apiKey').value,
       enabled: el('enabledToggle').getAttribute('aria-checked') === 'true',
       mouseEnabled: el('mouseToggle').getAttribute('aria-checked') === 'true',
+      lookupEnabled: el('lookupToggle').getAttribute('aria-checked') === 'true',
+      lookupUrl: el('lookupUrl').value.trim() || 'http://127.0.0.1:8766',
       autogen: el('autogen').checked,
       deckName: el('deckName').value.trim() || 'Omnia Capture',
       modelName: el('modelName').value.trim() || 'Basic',
@@ -252,6 +256,7 @@
 
     wirePill('enabled', el('enabledToggle'));
     wirePill('mouseEnabled', el('mouseToggle'));
+    wirePill('lookupEnabled', el('lookupToggle'));
 
     // Restore the form, then auto-test so the dropdowns are populated on open.
     restore().then(() => onTest());

@@ -38,6 +38,60 @@
   }
 
   const TOOLTIP_ID = 'omnia-clipper-tooltip';
+  const PANEL_ID = 'omnia-clipper-lookup-panel';
+  // The desktop clipper puts its pill down-right of the POINTER, which reads better than
+  // hanging it off the selection's top-right corner; the two clippers now match.
+  const CURSOR_OFFSET = 12;
+  let lastPointer = {x: 0, y: 0};
+  // The magnifier glyph, drawn inline so the button needs no packaged asset.
+  // Panel styling lives in the shadow root, so the host page's CSS cannot reach it. Mirrors the
+  // desktop clipper's panel: a soft header band, one quiet meta line, then translucent field
+  // cards with an accent spine.
+  const PANEL_CSS = `
+    .omnia-panel {
+      width: 360px; max-height: 460px; overflow-y: auto;
+      background: #ffffff; color: #16191d;
+      border: 1px solid #dfe3e8; border-radius: 12px;
+      box-shadow: 0 8px 28px rgba(0,0,0,0.18);
+      padding: 14px 16px 16px;
+      font: 13px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    }
+    .hdr {
+      display: flex; align-items: flex-start; gap: 8px;
+      background: linear-gradient(135deg, rgba(47,129,247,0.10), rgba(0,0,0,0));
+      border: 1px solid rgba(47,129,247,0.22); border-radius: 10px;
+      padding: 10px 12px; margin-bottom: 6px;
+    }
+    .word { flex: 1; font-size: 19px; font-weight: 600; word-break: break-word; }
+    .pill {
+      color: #fff; font-size: 11px; font-weight: 600;
+      padding: 2px 9px; border-radius: 9px; text-transform: capitalize; white-space: nowrap;
+    }
+    .muted { color: #6b727c; font-size: 11px; margin: 2px 2px 8px; }
+    .fields { display: flex; flex-direction: column; gap: 8px; }
+    .field {
+      background: rgba(246,247,249,0.75);
+      border: 1px solid #dfe3e8; border-left: 3px solid rgba(47,129,247,0.22);
+      border-radius: 8px; padding: 8px 10px 9px;
+    }
+    .fname {
+      font-size: 11px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.4px; color: #6b727c; margin-bottom: 7px;
+    }
+    .fval { font-size: 13px; color: #16191d; }
+    @media (prefers-color-scheme: dark) {
+      .omnia-panel { background: #1e2127; color: #e8eaed; border-color: #363b44; }
+      .muted, .fname { color: #9aa1ac; }
+      .field { background: rgba(38,42,49,0.75); border-color: #363b44; }
+      .fval { color: #e8eaed; }
+    }
+  `;
+
+  const LOOKUP_SVG =
+    '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" ' +
+    'stroke="#ffffff" stroke-width="2.4" stroke-linecap="round">' +
+    '<circle cx="10.5" cy="10.5" r="6.5"></circle>' +
+    '<line x1="15.5" y1="15.5" x2="21" y2="21"></line></svg>';
   const TOAST_ID = 'omnia-clipper-toast';
   // Cap the context snippet so we never ship a whole article into a note field.
   const MAX_CONTEXT_CHARS = 600;
@@ -52,6 +106,7 @@
   // Seeded from storage on load and kept fresh via chrome.storage.onChanged.
   let enabled = true;
   let mouseEnabled = true;
+  let lookupEnabled = true;
 
   // When the extension is reloaded/updated/disabled, THIS content script keeps running in an
   // already-open tab but loses its extension context: any chrome.* call then throws
@@ -110,12 +165,15 @@
       return;
     }
     try {
-      chrome.storage.sync.get({enabled: true, mouseEnabled: true}, (stored) => {
+      chrome.storage.sync.get(
+        {enabled: true, mouseEnabled: true, lookupEnabled: true},
+        (stored) => {
         if (chrome.runtime.lastError) {
           return;
         }
         enabled = stored.enabled !== false;
         mouseEnabled = stored.mouseEnabled !== false;
+        lookupEnabled = stored.lookupEnabled !== false;
         if (!enabled || !mouseEnabled) {
           removeTooltip();
         }
@@ -311,61 +369,236 @@
     pendingCapture = null;
   }
 
+  /** Remove the lookup panel, if one is open. */
+  function removePanel() {
+    const existing = document.getElementById(PANEL_ID);
+    if (existing) {
+      existing.remove();
+    }
+  }
+
   /**
    * Show the "+" button near the selection's bounding rectangle.
    * @param {!Object} capture The capture payload to attach to the button.
    */
   function showTooltip(capture) {
     removeTooltip();
+    removePanel();  // a new selection makes any open answer stale
     pendingCapture = capture;
 
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0) {
       return;
     }
-    const rect = selection.getRangeAt(0).getBoundingClientRect();
-    if (!rect || (rect.width === 0 && rect.height === 0)) {
-      return;
+
+    const pill = document.createElement('div');
+    pill.id = TOOLTIP_ID;
+    Object.assign(pill.style, {
+      position: 'fixed',
+      // Down-right of the pointer, clamped to the viewport — the desktop clipper's placement.
+      top: Math.min(window.innerHeight - 30, lastPointer.y + CURSOR_OFFSET) + 'px',
+      left: Math.min(window.innerWidth - 60, lastPointer.x + CURSOR_OFFSET) + 'px',
+      zIndex: '2147483647',
+      display: 'flex',
+      gap: '4px',
+      padding: '0',
+      background: 'transparent',
+      userSelect: 'none',
+    });
+
+    // Use mousedown (not click) so the selection is still alive when we read it, and
+    // preventDefault so pressing the button does not clear it.
+    const arm = (el, handler) => {
+      el.addEventListener('mousedown', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        handler();
+      });
+    };
+
+    const add = makeCircleButton('+', '#2d6cdf', 'Add to Anki (Omnia)');
+    add.setAttribute('aria-label', 'Add to Anki with Omnia');
+    arm(add, sendCapture);
+    pill.appendChild(add);
+
+    if (lookupEnabled) {
+      const look = makeCircleButton('', '#5b6472', 'Look this word up in your Anki collection');
+      look.setAttribute('aria-label', 'Look up in Anki with Omnia');
+      look.innerHTML = LOOKUP_SVG;
+      arm(look, () => sendLookup(capture.selection || ''));
+      pill.appendChild(look);
     }
 
-    const btn = document.createElement('div');
-    btn.id = TOOLTIP_ID;
-    btn.setAttribute('role', 'button');
-    btn.setAttribute('aria-label', 'Add to Anki with Omnia');
-    btn.title = 'Add to Anki (Omnia)';
-    btn.textContent = '+';
-    Object.assign(btn.style, {
-      position: 'fixed',
-      // Anchor just above the selection's top-right; clamp to viewport.
-      top: Math.max(4, rect.top - 22) + 'px',
-      left: Math.min(window.innerWidth - 22, rect.right + 4) + 'px',
-      zIndex: '2147483647',
-      width: '18px',
-      height: '18px',
-      lineHeight: '16px',
+    document.body.appendChild(pill);
+  }
+
+  /**
+   * Build one round icon button of the floating pill.
+   * @param {string} label Text glyph (empty when an SVG icon is set by the caller).
+   * @param {string} background CSS background colour.
+   * @param {string} title Tooltip text.
+   * @return {!HTMLElement}
+   */
+  function makeCircleButton(label, background, title) {
+    const el = document.createElement('div');
+    el.setAttribute('role', 'button');
+    el.title = title;
+    el.textContent = label;
+    Object.assign(el.style, {
+      width: '22px',
+      height: '22px',
+      lineHeight: '20px',
       textAlign: 'center',
       fontSize: '14px',
       fontWeight: '700',
       fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif',
       color: '#ffffff',
-      background: '#2d6cdf',
-      border: '1px solid #1f4fb0',
+      background: background,
+      border: 'none',
       borderRadius: '50%',
       boxShadow: '0 1px 4px rgba(0,0,0,0.3)',
       cursor: 'pointer',
-      userSelect: 'none',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
       padding: '0',
     });
+    return el;
+  }
 
-    // Use mousedown (not click) so we read the selection BEFORE it is cleared,
-    // and preventDefault so the page's selection stays intact while we capture.
-    btn.addEventListener('mousedown', (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      sendCapture();
+  // Card-state pill colours, matching the desktop clipper's panel.
+  const STATE_COLORS = {
+    new: '#3b82f6',
+    learning: '#f59e0b',
+    relearning: '#ef4444',
+    review: '#22a06b',
+  };
+
+  /**
+   * Ask the background worker to look ``word`` up and render the answer in a panel.
+   * @param {string} word The captured word.
+   */
+  function sendLookup(word) {
+    if (!word.trim()) {
+      return;
+    }
+    showPanel(renderLoading(word), word);
+    try {
+      chrome.runtime.sendMessage({type: 'omnia-lookup', word: word}, (response) => {
+        if (chrome.runtime.lastError) {
+          showPanel(renderMessage('Lookup unavailable', chrome.runtime.lastError.message), word);
+          return;
+        }
+        if (!response || !response.ok) {
+          showPanel(
+            renderMessage('Lookup unavailable', (response && response.error) || 'Unknown error.'),
+            word
+          );
+          return;
+        }
+        showPanel(renderResult(response.result, word), word);
+      });
+    } catch (err) {
+      showPanel(renderMessage('Lookup unavailable', String(err)), word);
+    }
+  }
+
+  /**
+   * Show ``inner`` in the floating lookup panel, anchored beside the pointer.
+   *
+   * Rendered in a shadow root so the host page's CSS cannot restyle it — a content script's UI
+   * is otherwise at the mercy of whatever the page's stylesheet does to divs.
+   *
+   * @param {string} inner The panel's inner HTML.
+   * @param {string} word The word being shown (for the aria label).
+   */
+  function showPanel(inner, word) {
+    removePanel();
+    const host = document.createElement('div');
+    host.id = PANEL_ID;
+    host.setAttribute('aria-label', `Omnia lookup: ${word}`);
+    // Anchor beside the pointer, then keep the whole panel on screen: flip to the left of the
+    // pointer when it would run off the right edge, and lift it when it would run off the bottom.
+    const width = 362;
+    const height = Math.min(460, Math.round(window.innerHeight * 0.8));
+    let left = lastPointer.x + CURSOR_OFFSET;
+    let top = lastPointer.y + CURSOR_OFFSET;
+    if (left + width > window.innerWidth - 8) {
+      left = Math.max(8, lastPointer.x - width - CURSOR_OFFSET);
+    }
+    if (top + height > window.innerHeight - 8) {
+      top = Math.max(8, window.innerHeight - height - 8);
+    }
+    Object.assign(host.style, {
+      position: 'fixed',
+      top: top + 'px',
+      left: left + 'px',
+      zIndex: '2147483647',
     });
+    const root = host.attachShadow({mode: 'open'});
+    root.innerHTML = `<style>${PANEL_CSS}</style><div class="omnia-panel">${inner}</div>`;
+    root.querySelectorAll('[data-omnia-close]').forEach((el) => {
+      el.addEventListener('click', removePanel);
+    });
+    document.body.appendChild(host);
+  }
 
-    document.body.appendChild(btn);
+  /** @return {string} The loading state's HTML. */
+  function renderLoading(word) {
+    return `<div class="hdr"><div class="word">${escapeHtml(word)}</div></div>
+      <div class="muted">Searching your collection…</div>`;
+  }
+
+  /** @return {string} A titled message (error / unavailable). */
+  function renderMessage(title, detail) {
+    return `<div class="hdr"><div class="word">${escapeHtml(title)}</div></div>
+      <div class="muted">${escapeHtml(detail)}</div>`;
+  }
+
+  /**
+   * Render the lookup payload: the top card, or a clear "not in your collection" state.
+   * @param {!Object} result The payload from the add-on.
+   * @param {string} word The looked-up word.
+   * @return {string}
+   */
+  function renderResult(result, word) {
+    const cards = (result && result.cards) || [];
+    if (!cards.length) {
+      return `<div class="hdr"><div class="word">${escapeHtml(word)}</div></div>
+        <div class="muted">No card for this word in your collection yet.</div>`;
+    }
+    const card = cards[0];
+    const state = String(card.state || 'new');
+    const bits = [];
+    if (card.interval_days) bits.push(`${card.interval_days}d interval`);
+    if (card.reps) bits.push(`${card.reps} reviews`);
+    if (card.lapses) bits.push(`${card.lapses} lapses`);
+    if (card.deck) bits.push(String(card.deck).split('::').pop());
+    const fields = (card.fields || [])
+      .filter((f) => f && f.text)
+      .map(
+        (f) =>
+          `<div class="field"><div class="fname">${escapeHtml(f.name)}</div>` +
+          `<div class="fval">${escapeHtml(f.text).replace(/\n/g, '<br>')}</div></div>`
+      )
+      .join('');
+    const more =
+      cards.length > 1 ? `<div class="muted">+${cards.length - 1} more note(s)</div>` : '';
+    return `<div class="hdr">
+        <div class="word">${escapeHtml(card.title || word)}</div>
+        <div class="pill" style="background:${STATE_COLORS[state] || STATE_COLORS.review}">
+          ${escapeHtml(state)}
+        </div>
+      </div>
+      <div class="muted">${escapeHtml(bits.join('  ·  '))}</div>
+      <div class="fields">${fields}</div>${more}`;
+  }
+
+  /** Escape text for safe insertion into the panel's HTML. */
+  function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = String(text == null ? '' : text);
+    return div.innerHTML;
   }
 
   /** Send the pending capture to the background worker and report the result. */
@@ -523,6 +756,20 @@
     }, 10);
   }
 
+  document.addEventListener(
+    'mousedown',
+    (event) => {
+      lastPointer = {x: event.clientX, y: event.clientY};
+    },
+    true
+  );
+  document.addEventListener(
+    'mouseup',
+    (event) => {
+      lastPointer = {x: event.clientX, y: event.clientY};
+    },
+    true
+  );
   document.addEventListener('mouseup', onSelectionEvent, true);
   document.addEventListener('dblclick', onSelectionEvent, true);
 

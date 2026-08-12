@@ -270,7 +270,45 @@ if (chrome.contextMenus) {
   });
 }
 
+/**
+ * Ask the Omnia add-on whether a word is already in the collection.
+ *
+ * The fetch happens HERE, in the service worker, not in the content script: the extension holds
+ * host permission for the loopback port, so this request is not subject to page CORS, and the
+ * add-on deliberately sends no `Access-Control-Allow-Origin` header — that is what stops any
+ * random website from probing the user's collection.
+ *
+ * @param {string} word The word to look up.
+ * @param {string} baseUrl Where the add-on's lookup service listens.
+ * @return {!Promise<!Object>} The lookup payload ({word, found, cards, ...}).
+ */
+async function lookupWord(word, baseUrl) {
+  const url = `${baseUrl.replace(/\/$/, '')}/lookup?word=${encodeURIComponent(word)}`;
+  const response = await fetch(url, {method: 'GET'});
+  if (!response.ok) {
+    throw new Error(`Lookup service answered ${response.status}.`);
+  }
+  return response.json();
+}
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message && message.type === 'omnia-lookup') {
+    (async () => {
+      try {
+        const settings = await loadSettings();
+        const base = settings.lookupUrl || 'http://127.0.0.1:8766';
+        sendResponse({ok: true, result: await lookupWord(message.word, base)});
+      } catch (err) {
+        sendResponse({
+          ok: false,
+          error:
+            "Can't reach Anki's lookup service. Make sure Anki is running with Omnia's " +
+            '“Word Lookup” feature switched on.',
+        });
+      }
+    })();
+    return true;  // async sendResponse
+  }
   if (!message || message.type !== 'omnia-capture') {
     return false;
   }
