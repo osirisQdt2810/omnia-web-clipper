@@ -416,6 +416,7 @@
       });
     };
 
+    let lookupButton = null;
     const add = makeCircleButton('+', '#2d6cdf', 'Add to Anki (Omnia)');
     add.setAttribute('aria-label', 'Add to Anki with Omnia');
     arm(add, sendCapture);
@@ -425,11 +426,18 @@
       const look = makeCircleButton('', '#5b6472', 'Look this word up in your Anki collection');
       look.setAttribute('aria-label', 'Look up in Anki with Omnia');
       look.innerHTML = LOOKUP_SVG;
+      look.style.position = 'relative';
       arm(look, () => sendLookup(capture.selection || ''));
       pill.appendChild(look);
+      lookupButton = look;
     }
 
     document.body.appendChild(pill);
+    if (lookupButton) {
+      // Only now that the pill is IN the document: the probe's guard checks isConnected, and a
+      // fast reply would otherwise arrive while the button is still detached and be dropped.
+      probeLookup(capture.selection || '', lookupButton);
+    }
   }
 
   /**
@@ -473,6 +481,72 @@
     relearning: '#ef4444',
     review: '#22a06b',
   };
+
+  /**
+   * Ask in the background how many cards match, and mark the magnifier accordingly.
+   *
+   * A count badge means "you already have this"; a muted glyph means "not in your collection
+   * yet" — both answer the common question without opening anything. A failed probe leaves the
+   * button in its neutral state rather than showing an error nobody asked for.
+   *
+   * @param {string} word The captured word.
+   * @param {!HTMLElement} button The magnifier button to annotate.
+   */
+  function probeLookup(word, button) {
+    if (!word.trim()) {
+      return;
+    }
+    try {
+      chrome.runtime.sendMessage({type: 'omnia-lookup', word: word}, (response) => {
+        if (chrome.runtime.lastError || !response || !response.ok) {
+          return;  // unknown -> stay neutral
+        }
+        // The pill may have been replaced by a newer selection while this was in flight.
+        if (!button.isConnected) {
+          return;
+        }
+        const count = ((response.result || {}).cards || []).length;
+        const quoted = `“${word}”`;
+        if (count > 0) {
+          button.title = `${count} card(s) match ${quoted} — click to see them`;
+          button.appendChild(makeCountBadge(count));
+        } else {
+          button.style.background = '#8b93a1';
+          button.title = `No card for ${quoted} yet — click to confirm`;
+        }
+      });
+    } catch (_e) {
+      // Extension context gone; the neutral button is still perfectly usable.
+    }
+  }
+
+  /**
+   * Build the small green count badge that rides on the magnifier.
+   * @param {number} count Matching notes.
+   * @return {!HTMLElement}
+   */
+  function makeCountBadge(count) {
+    const badge = document.createElement('div');
+    badge.textContent = count > 9 ? '9+' : String(count);
+    Object.assign(badge.style, {
+      position: 'absolute',
+      top: '-4px',
+      right: '-4px',
+      minWidth: '13px',
+      height: '13px',
+      lineHeight: '13px',
+      padding: '0 3px',
+      boxSizing: 'border-box',
+      borderRadius: '7px',
+      background: '#22a06b',
+      color: '#ffffff',
+      fontSize: '9px',
+      fontWeight: '700',
+      textAlign: 'center',
+      pointerEvents: 'none',
+    });
+    return badge;
+  }
 
   /**
    * Ask the background worker to look ``word`` up and render the answer in a panel.
@@ -777,13 +851,20 @@
   // handleContextGone can removeEventListener them on a re-injection.
   function onOutsideMousedown(event) {
     const tooltip = document.getElementById(TOOLTIP_ID);
-    if (tooltip && event.target !== tooltip) {
+    if (tooltip && !tooltip.contains(event.target)) {
       removeTooltip();
+    }
+    // The panel is a popover: clicking anywhere outside it must close it. event.target is the
+    // shadow HOST for a click inside the panel, so a plain identity check is enough.
+    const panel = document.getElementById(PANEL_ID);
+    if (panel && event.target !== panel && !panel.contains(event.target)) {
+      removePanel();
     }
   }
   function onEscapeKeydown(event) {
     if (event.key === 'Escape') {
       removeTooltip();
+      removePanel();
     }
   }
   document.addEventListener('mousedown', onOutsideMousedown, true);
