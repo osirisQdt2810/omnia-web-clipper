@@ -79,10 +79,20 @@
       letter-spacing: 0.4px; color: #6b727c; margin-bottom: 7px;
     }
     .fval { font-size: 13px; color: #16191d; }
+    .media-row { display: flex; flex-wrap: wrap; gap: 6px; }
+    .media {
+      font: inherit; font-size: 12px; cursor: pointer;
+      background: transparent; color: inherit;
+      border: 1px solid #dfe3e8; border-radius: 7px; padding: 4px 10px;
+    }
+    .media:hover { border-color: #2f81f7; color: #2f81f7; }
+    .media[disabled] { opacity: 0.6; cursor: default; }
+    .media-img { max-width: 100%; max-height: 220px; border-radius: 6px; display: block; }
     @media (prefers-color-scheme: dark) {
       .omnia-panel { background: #1e2127; color: #e8eaed; border-color: #363b44; }
       .muted, .fname { color: #9aa1ac; }
       .field { background: rgba(38,42,49,0.75); border-color: #363b44; }
+      .media { border-color: #363b44; }
       .fval { color: #e8eaed; }
     }
   `;
@@ -614,6 +624,12 @@
     root.querySelectorAll('[data-omnia-close]').forEach((el) => {
       el.addEventListener('click', removePanel);
     });
+    root.querySelectorAll('[data-omnia-audio]').forEach((el) => {
+      el.addEventListener('click', () => playMedia(el, el.dataset.omniaAudio));
+    });
+    root.querySelectorAll('[data-omnia-image]').forEach((el) => {
+      el.addEventListener('click', () => showMedia(el, el.dataset.omniaImage));
+    });
     document.body.appendChild(host);
   }
 
@@ -648,13 +664,33 @@
     if (card.reps) bits.push(`${card.reps} reviews`);
     if (card.lapses) bits.push(`${card.lapses} lapses`);
     if (card.deck) bits.push(String(card.deck).split('::').pop());
+    // Media-only fields (Image, Word (audio)) carry no text. Dropping them left the web panel
+    // showing strictly less than the desktop one for the SAME note, which is confusing rather
+    // than tidy — they become buttons instead.
     const fields = (card.fields || [])
-      .filter((f) => f && f.text)
-      .map(
-        (f) =>
-          `<div class="field"><div class="fname">${escapeHtml(f.name)}</div>` +
-          `<div class="fval">${escapeHtml(f.text).replace(/\n/g, '<br>')}</div></div>`
-      )
+      .filter((f) => f && (f.text || (f.audio || []).length || (f.images || []).length))
+      .map((f) => {
+        const head = `<div class="fname">${escapeHtml(f.name)}</div>`;
+        if (f.text) {
+          const body = escapeHtml(f.text).replace(/\n/g, '<br>');
+          return `<div class="field">${head}<div class="fval">${body}</div></div>`;
+        }
+        const buttons = []
+          .concat(
+            (f.audio || []).map(
+              (name) =>
+                `<button class="media" data-omnia-audio="${escapeHtml(name)}">▶ Play</button>`
+            )
+          )
+          .concat(
+            (f.images || []).map(
+              (name) =>
+                `<button class="media" data-omnia-image="${escapeHtml(name)}">🖼 Show image</button>`
+            )
+          )
+          .join('');
+        return `<div class="field">${head}<div class="fval media-row">${buttons}</div></div>`;
+      })
       .join('');
     const more =
       cards.length > 1 ? `<div class="muted">+${cards.length - 1} more note(s)</div>` : '';
@@ -666,6 +702,72 @@
       </div>
       <div class="muted">${escapeHtml(bits.join('  ·  '))}</div>
       <div class="fields">${fields}</div>${more}`;
+  }
+
+  /**
+   * Fetch a media file's bytes through the background worker.
+   * @param {string} filename The media file name as stored in the collection.
+   * @return {!Promise<?Blob>} The bytes, or null when unavailable.
+   */
+  function fetchMedia(filename) {
+    return new Promise((resolve) => {
+      try {
+        chrome.runtime.sendMessage({type: 'omnia-media', filename: filename}, (response) => {
+          if (chrome.runtime.lastError || !response || !response.ok) {
+            resolve(null);
+            return;
+          }
+          try {
+            const binary = atob(response.base64);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i += 1) {
+              bytes[i] = binary.charCodeAt(i);
+            }
+            resolve(new Blob([bytes]));
+          } catch (_e) {
+            resolve(null);
+          }
+        });
+      } catch (_e) {
+        resolve(null);
+      }
+    });
+  }
+
+  /** Play a note's audio clip in place. */
+  async function playMedia(button, filename) {
+    button.disabled = true;
+    const original = button.textContent;
+    button.textContent = '…';
+    const blob = await fetchMedia(filename);
+    if (!blob) {
+      button.textContent = 'unavailable';
+      return;
+    }
+    const audio = new Audio(URL.createObjectURL(blob));
+    // Free the object URL once the clip finishes; a panel left open all day must not leak.
+    audio.addEventListener('ended', () => URL.revokeObjectURL(audio.src));
+    audio.play().catch(() => {
+      button.textContent = 'unavailable';
+    });
+    button.textContent = original;
+    button.disabled = false;
+  }
+
+  /** Replace the button with the fetched image. */
+  async function showMedia(button, filename) {
+    button.disabled = true;
+    button.textContent = 'Loading…';
+    const blob = await fetchMedia(filename);
+    if (!blob) {
+      button.textContent = 'unavailable';
+      return;
+    }
+    const img = document.createElement('img');
+    img.src = URL.createObjectURL(blob);
+    img.className = 'media-img';
+    img.addEventListener('load', () => URL.revokeObjectURL(img.src));
+    button.replaceWith(img);
   }
 
   /** Escape text for safe insertion into the panel's HTML. */

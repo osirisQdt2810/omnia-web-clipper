@@ -292,6 +292,30 @@ async function lookupWord(word, baseUrl) {
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message && message.type === 'omnia-media') {
+    // A lookup result names its media files but cannot carry them; the panel asks for the bytes
+    // only when the user actually opens an image or plays a clip.
+    (async () => {
+      try {
+        const settings = await loadSettings();
+        const data = await ankiConnect(
+          settings.ankiConnectUrl,
+          'retrieveMediaFile',
+          {filename: message.filename},
+          settings.apiKey
+        );
+        // AnkiConnect answers base64, or `false` when the file is missing.
+        sendResponse(
+          typeof data === 'string' && data
+            ? {ok: true, base64: data}
+            : {ok: false, error: 'Media file not found.'}
+        );
+      } catch (err) {
+        sendResponse({ok: false, error: err && err.message ? err.message : String(err)});
+      }
+    })();
+    return true;  // async sendResponse
+  }
   if (message && message.type === 'omnia-lookup') {
     (async () => {
       try {
