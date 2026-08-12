@@ -379,6 +379,24 @@
     pendingCapture = null;
   }
 
+  /**
+   * Whether ``node`` belongs to the clipper's own UI (the pill or the lookup panel).
+   *
+   * A click inside the panel is retargeted to its shadow HOST, so comparing against the host
+   * covers the whole panel without piercing the shadow root.
+   *
+   * @param {?Node} node The event target.
+   * @return {boolean}
+   */
+  function isOwnUi(node) {
+    const tooltip = document.getElementById(TOOLTIP_ID);
+    const panel = document.getElementById(PANEL_ID);
+    if (tooltip && (tooltip === node || tooltip.contains(node))) {
+      return true;
+    }
+    return !!panel && (panel === node || panel.contains(node));
+  }
+
   /** Remove the lookup panel, if one is open. */
   function removePanel() {
     const existing = document.getElementById(PANEL_ID);
@@ -913,7 +931,14 @@
   let debounceTimer = null;
 
   /** Selection-change handler: (re)build the capture and show/hide the "+". */
-  function onSelectionEvent() {
+  function onSelectionEvent(event) {
+    // A click on our OWN pill or panel is not a new selection. Without this the mouseup that
+    // follows pressing the magnifier re-ran this handler, which rebuilt the pill and — because
+    // a new selection invalidates any open answer — tore down the panel that the very same
+    // click had just opened.
+    if (event && event.target && isOwnUi(event.target)) {
+      return;
+    }
     // The "+" tooltip is gated by BOTH the master toggle and the mouse toggle.
     if (!enabled || !mouseEnabled) {
       removeTooltip();
