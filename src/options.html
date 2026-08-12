@@ -246,6 +246,20 @@
           <span class="knob"></span>
         </button>
       </div>
+      <div class="toggle-row">
+        <div>
+          <div class="toggle-label">Look up in Anki</div>
+          <div class="toggle-sub">
+            Show a magnifier beside the "+" that shows the card you already have for the word.
+            Needs Omnia's "Word Lookup" feature switched on in Anki.
+          </div>
+        </div>
+        <button class="pill" id="lookupToggle" role="switch" aria-checked="true" aria-label="Look up in Anki">
+          <span class="pill-text on">ON</span>
+          <span class="pill-text off">OFF</span>
+          <span class="knob"></span>
+        </button>
+      </div>
       <div class="checkbox-row">
         <input type="checkbox" id="autogen" />
         <label for="autogen" style="margin: 0">Auto-generate in Omnia (adds the "omnia-autogen" tag)</label>
@@ -261,6 +275,8 @@
       <input type="text" id="ankiConnectUrl" placeholder="http://127.0.0.1:8765" />
       <label for="apiKey">API key (leave blank if AnkiConnect apiKey is null)</label>
       <input type="password" id="apiKey" placeholder="(none)" />
+      <label for="lookupUrl">Lookup service URL</label>
+      <input type="text" id="lookupUrl" placeholder="http://127.0.0.1:8766" />
 
       <div class="actions" style="margin-top: 12px">
         <button class="secondary" id="testBtn">Test connection</button>
