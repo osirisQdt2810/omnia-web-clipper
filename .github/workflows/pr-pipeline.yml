@@ -1,0 +1,120 @@
+# PR pipeline: sanity checks -> Claude review -> gated auto-merge.
+# Same gate design as osirisQdt2810/omnia: merge needs green checks + an explicit
+# APPROVE verdict + the `automerge` label + an unchanged head commit.
+# A PR that modifies .github/workflows cannot pass review (Claude app
+# anti-tampering) and always needs a manual merge.
+
+name: PR Pipeline
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+    branches: [main]
+
+concurrency:
+  group: pr-pipeline-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Sanity checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: JS syntax + manifest sanity
+        run: |
+          set -euo pipefail
+          for f in src/*.js; do node --check "$f" && echo "OK $f"; done
+          node -e "const m=JSON.parse(require('fs').readFileSync('manifest.json','utf8')); if(m.manifest_version!==3) throw new Error('expected MV3'); console.log('manifest.json OK (MV3, v'+m.version+')')"
+
+  review:
+    name: Claude review
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event.pull_request.draft == false
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    env:
+      HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' || secrets.ANTHROPIC_API_KEY != '' }}
+    outputs:
+      verdict: ${{ steps.verdict.outputs.value }}
+    steps:
+      - name: Fail closed when the review credential is missing
+        if: env.HAS_TOKEN != 'true'
+        run: |
+          echo "::error::Neither CLAUDE_CODE_OAUTH_TOKEN nor ANTHROPIC_API_KEY is available. Refusing to skip review while auto-merge is possible."
+          exit 1
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Review the PR
+        uses: anthropics/claude-code-action@c3d45e8e941e1b2ad7b278c57482d9c5bf1f35b3 # v1.0.99
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Review pull request #${{ github.event.pull_request.number }} in ${{ github.repository }}.
+
+            This is a Chrome Manifest V3 extension (the Omnia web clipper). House rules:
+            - Content-script UI lives in a shadow DOM and must tear down symmetrically
+              (no orphaned pills/panels; outside-click and own-UI guards preserved).
+            - Cross-origin fetches happen ONLY in the service worker via host_permissions,
+              never in the content script; no remote code, no eval.
+            - Selection/mouse handlers must ignore events originating from the extension's
+              own UI (the isOwnUi guard pattern).
+            - Keep the two-button pill anchoring behavior consistent with the desktop clipper.
+
+            Inspect the change with `gh pr diff` and `gh pr view`, read surrounding code for
+            context, and judge correctness (a concrete failing scenario for every defect you
+            claim), UX regressions, and the rules above.
+
+            Post findings as a single `gh pr comment` (clean PR: short summary; defective PR:
+            each blocking issue with file:line, failure scenario, suggested fix).
+
+            Finally — MANDATORY LAST ACTION — write your one-word verdict:
+              echo APPROVE > "$RUNNER_TEMP/verdict"     # no blocking issues
+              echo BLOCKING > "$RUNNER_TEMP/verdict"    # at least one blocking issue
+            If you write nothing, the pipeline treats the review as BLOCKING.
+          claude_args: '--allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(echo:*)"'
+      - name: Publish verdict
+        id: verdict
+        run: |
+          v=$(cat "$RUNNER_TEMP/verdict" 2>/dev/null || echo BLOCKING)
+          if [ "$v" != "APPROVE" ]; then v=BLOCKING; fi
+          echo "value=$v" >> "$GITHUB_OUTPUT"
+          echo "Review verdict: $v"
+
+  merge:
+    name: Auto-merge
+    needs: [test, review]
+    if: needs.review.outputs.verdict == 'APPROVE' && github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Merge when the automerge label is present
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          labels=$(gh pr view "$PR" --repo "$REPO" --json labels --jq '.labels[].name')
+          if printf '%s\n' "$labels" | grep -qx automerge; then
+            gh pr merge "$PR" --repo "$REPO" --merge --match-head-commit "$HEAD_SHA"
+            echo "PR #$PR merged at $HEAD_SHA."
+          else
+            echo "No automerge label — review is APPROVE but merging is left to a human."
+          fi
