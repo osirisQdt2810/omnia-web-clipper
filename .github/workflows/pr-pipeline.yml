@@ -101,8 +101,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         with:
+          # ONE credential, never two. The action validates every key it is HANDED, not
+          # every key it needs, so an `anthropic_api_key:` line resolving to the empty
+          # string (this repo has no such secret) fails the job before it makes any
+          # request, with a stack trace that names neither secret.
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # OFF because it authenticates differently from the rest of the action: the
+          # classifier constructs `new Anthropic({ apiKey })` directly, a path with no OAuth
+          # support, so with only CLAUDE_CODE_OAUTH_TOKEN set it throws "Could not resolve
+          # authentication" and fails the whole job. It defaults to true, so it has to be
+          # switched off explicitly by anyone authenticating the way this repo does.
+          classify_inline_comments: false
           prompt: |
             Review pull request #${{ github.event.pull_request.number }} in ${{ github.repository }}.
 
