@@ -30,6 +30,21 @@ jobs:
           for f in src/*.js; do node --check "$f" && echo "OK $f"; done
           node -e "const m=JSON.parse(require('fs').readFileSync('manifest.json','utf8')); if(m.manifest_version!==3) throw new Error('expected MV3'); console.log('manifest.json OK (MV3, v'+m.version+')')"
 
+      - name: Behaviour tests
+        run: |
+          set -euo pipefail
+          # Plain Node with `assert` -- no framework, no npm install, nothing to keep current.
+          # A repo with no tests gets no signal from `node --check`: it says the file parses,
+          # not that it does anything. Each test file exits non-zero on failure.
+          shopt -s nullglob
+          found=0
+          for f in tests/*.test.js; do
+            echo "--- $f"
+            node "$f"
+            found=1
+          done
+          if [ "$found" -eq 0 ]; then echo "no test files found"; exit 1; fi
+
   pr-body:
     name: PR description
     runs-on: ubuntu-latest
