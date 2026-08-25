@@ -367,13 +367,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 // The flag is what carries intent ACROSS the reload: the page that asked is destroyed by the
 // reload it triggers, so it cannot reopen anything itself. Neither onInstalled nor onStartup
 // fires for a plain reload, which is why this is top-level rather than in a listener.
-const OMNIA_REOPEN_OPTIONS_KEY = 'omniaReopenOptionsAfterReload';
+const {REOPEN_OPTIONS_KEY, REOPEN_OPTIONS_TTL_MS} = self.OmniaClipper;
 
-chrome.storage.local.get(OMNIA_REOPEN_OPTIONS_KEY, (stored) => {
-  if (chrome.runtime.lastError || !stored || !stored[OMNIA_REOPEN_OPTIONS_KEY]) return;
+chrome.storage.local.get(REOPEN_OPTIONS_KEY, (stored) => {
+  const askedAt = stored && stored[REOPEN_OPTIONS_KEY];
+  if (chrome.runtime.lastError || !askedAt) return;
   // Clear FIRST: a failure to open must not leave a flag that reopens Settings on every
   // later service-worker start, which the browser does on its own schedule.
-  chrome.storage.local.remove(OMNIA_REOPEN_OPTIONS_KEY, () => {
-    if (chrome.runtime.openOptionsPage) chrome.runtime.openOptionsPage();
+  chrome.storage.local.remove(REOPEN_OPTIONS_KEY, () => {
+    // A request older than the window is a handoff that was MISSED, not one to honour. The
+    // worker can start hours later for reasons of its own, and opening Settings then would
+    // ambush someone who has long forgotten pressing Reload.
+    if (Date.now() - askedAt > REOPEN_OPTIONS_TTL_MS) return;
+    chrome.runtime.openOptionsPage();
   });
 });

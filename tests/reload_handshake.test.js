@@ -19,6 +19,16 @@ const vm = require('vm');
 
 const SRC = path.join(__dirname, '..', 'src');
 const REOPEN_KEY = 'omniaReopenOptionsAfterReload';
+const TTL_MS = 30000;
+
+/** The slice of shared.js both halves destructure. Loaded for real below. */
+function sharedExports() {
+  const sandbox = {self: {}, fetch: async function () { return {}; }, console: console};
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(path.join(SRC, 'shared.js'), 'utf8'), sandbox);
+  return sandbox.self.OmniaClipper;
+}
 
 /** A recording stand-in for the slice of `chrome.*` these two files touch. */
 function makeChrome(initialStorage) {
@@ -71,12 +81,10 @@ function makeChrome(initialStorage) {
 /** Evaluate background.js top-level with a mock chrome, and return what it did. */
 function runBackground(initialStorage) {
   const chrome = makeChrome(initialStorage);
-  const selfObj = {
-    OmniaClipper: {
-      loadSettings: async function () { return {}; },
-      ankiConnect: async function () { return {}; }
-    }
-  };
+  const selfObj = {OmniaClipper: Object.assign({
+    loadSettings: async function () { return {}; },
+    ankiConnect: async function () { return {}; }
+  }, sharedExports())};
   const sandbox = {
     chrome: chrome,
     self: selfObj,
@@ -86,6 +94,7 @@ function runBackground(initialStorage) {
     clearTimeout: clearTimeout,
     URL: URL,
     URLSearchParams: URLSearchParams,
+    Date: Date,
     fetch: async function () { return {json: async function () { return {}; }}; }
   };
   sandbox.globalThis = sandbox;
@@ -134,13 +143,12 @@ function runOptions(search) {
     fetch: async function () { return {json: async function () { return {}; }}; },
     // options.js destructures these out of `self.OmniaClipper`, which shared.js normally
     // defines. The reload branch runs before any of them is called, so stubs are enough.
-    self: {
-      OmniaClipper: {
-        loadSettings: async function () { return {}; },
-        saveSettings: async function () {},
-        ankiConnect: async function () { return {}; }
-      }
-    }
+    Date: Date,
+    self: {OmniaClipper: Object.assign({
+      loadSettings: async function () { return {}; },
+      saveSettings: async function () {},
+      ankiConnect: async function () { return {}; }
+    }, sharedExports())}
   };
   sandbox.window = sandbox;
   sandbox.globalThis = sandbox;
@@ -162,13 +170,13 @@ const tests = {
   },
 
   'background: the flag reopens Settings exactly once': function () {
-    const chrome = runBackground({[REOPEN_KEY]: true});
+    const chrome = runBackground({[REOPEN_KEY]: Date.now()});
     assert.ok(chrome.calls.includes('runtime.openOptionsPage'), 'Settings was not reopened');
     assert.strictEqual(chrome.store[REOPEN_KEY], undefined, 'the flag survived the reopen');
   },
 
   'background: the flag is cleared BEFORE Settings opens': function () {
-    const chrome = runBackground({[REOPEN_KEY]: true});
+    const chrome = runBackground({[REOPEN_KEY]: Date.now()});
     const cleared = chrome.calls.indexOf('storage.remove:' + REOPEN_KEY);
     const opened = chrome.calls.indexOf('runtime.openOptionsPage');
     assert.ok(cleared !== -1 && opened !== -1, 'expected both a clear and an open');
@@ -196,7 +204,10 @@ const tests = {
   'options: the reload parameter stores the flag and reloads': function () {
     const result = runOptions('?omnia-reload=1');
     assert.ok(result.chrome.calls.includes('runtime.reload'), 'the extension was not reloaded');
-    assert.strictEqual(result.chrome.store[REOPEN_KEY], true, 'the reopen flag was not stored');
+    assert.ok(
+      typeof result.chrome.store[REOPEN_KEY] === 'number',
+      'the reopen flag must be a TIMESTAMP so a missed handoff can decay'
+    );
   },
 
   'options: the flag is stored BEFORE the reload': function () {
@@ -221,6 +232,35 @@ const tests = {
   'options: an unrelated query string is ignored': function () {
     const result = runOptions('?omnia-reload=0&other=1');
     assert.ok(!result.chrome.calls.includes('runtime.reload'), 'reloaded on omnia-reload=0');
+  },
+
+  'background: a stale request is dropped, not honoured': function () {
+    const chrome = runBackground({[REOPEN_KEY]: Date.now() - (TTL_MS + 1000)});
+    assert.ok(
+      !chrome.calls.includes('runtime.openOptionsPage'),
+      'a request whose handoff was missed reopened Settings out of nowhere. The worker ' +
+        'restarts on the browser own schedule, possibly hours after Reload was pressed.'
+    );
+    assert.strictEqual(chrome.store[REOPEN_KEY], undefined, 'the stale flag was left behind');
+  },
+
+  'background: a fresh request is still honoured': function () {
+    const chrome = runBackground({[REOPEN_KEY]: Date.now() - 1000});
+    assert.ok(chrome.calls.includes('runtime.openOptionsPage'), 'a fresh request was dropped');
+  },
+
+  'the two halves share ONE key definition': function () {
+    const shared = sharedExports();
+    assert.strictEqual(shared.REOPEN_OPTIONS_KEY, REOPEN_KEY);
+    assert.strictEqual(typeof shared.REOPEN_OPTIONS_TTL_MS, 'number');
+    const bg = fs.readFileSync(path.join(SRC, 'background.js'), 'utf8');
+    const opts = fs.readFileSync(path.join(SRC, 'options.js'), 'utf8');
+    assert.ok(
+      bg.indexOf("'" + REOPEN_KEY + "'") === -1 &&
+        opts.indexOf("'" + REOPEN_KEY + "'") === -1,
+      'the key is hardcoded again in one of the halves; a typo in either would break the ' +
+        'handshake silently, with each half looking correct on its own'
+    );
   }
 };
 

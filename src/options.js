@@ -14,7 +14,10 @@
 (() => {
   'use strict';
 
-  const {loadSettings, saveSettings, ankiConnect} = self.OmniaClipper;
+  const {loadSettings, saveSettings, ankiConnect, REOPEN_OPTIONS_KEY} =
+    self.OmniaClipper;
+  // How long to wait before admitting the reload did not come back.
+  const REOPEN_FALLBACK_MS = 5000;
 
   const CAPTURE_KEYS = [
     'selection',
@@ -269,9 +272,23 @@
     }
     if (!requested) return false;
     document.body.textContent = 'Reloading the Omnia Web Clipper…';
-    const key = 'omniaReopenOptionsAfterReload';
-    // Only reload once the flag is stored, or the fresh worker has nothing to act on.
-    chrome.storage.local.set({[key]: true}, () => chrome.runtime.reload());
+    // If the reload never brings Settings back, this page would otherwise sit on that line
+    // for ever with no route out. Offer one rather than leave the user stuck.
+    setTimeout(() => {
+      if (!document.body) return;
+      const link = document.createElement('a');
+      link.href = chrome.runtime.getURL('src/options.html');
+      link.textContent = 'Reload did not finish — open Settings';
+      document.body.textContent = '';
+      document.body.appendChild(link);
+    }, REOPEN_FALLBACK_MS);
+    // A TIMESTAMP, not `true`: the worker uses it to tell a fresh request from one whose
+    // handoff was missed, which must decay instead of reopening Settings out of nowhere.
+    // Only reload once it is stored, or the fresh worker has nothing to act on.
+    chrome.storage.local.set(
+      {[REOPEN_OPTIONS_KEY]: Date.now()},
+      () => chrome.runtime.reload()
+    );
     return true;
   }
 
