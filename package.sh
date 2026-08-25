@@ -20,6 +20,10 @@ zip -r "$out" . \
   -x ".git" \
   -x ".git/*" \
   -x ".gitignore" \
+  -x ".github" \
+  -x ".github/*" \
+  -x "tests" \
+  -x "tests/*" \
   -x "assets/icons/icon.svg" \
   -x ".DS_Store" \
   -x "*/.DS_Store" \

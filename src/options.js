@@ -14,7 +14,12 @@
 (() => {
   'use strict';
 
-  const {loadSettings, saveSettings, ankiConnect} = self.OmniaClipper;
+  const {loadSettings, saveSettings, ankiConnect, REOPEN_OPTIONS_KEY} =
+    self.OmniaClipper;
+  // How long to wait before admitting the reload did not come back. Deliberately LONGER than
+  // the worker's own validity window: offering the link sooner means a merely SLOW reload ends
+  // with two Settings tabs, one from the click and one from the worker.
+  const REOPEN_FALLBACK_MS = self.OmniaClipper.REOPEN_OPTIONS_TTL_MS + 5000;
 
   const CAPTURE_KEYS = [
     'selection',
@@ -249,7 +254,63 @@
     }
   }
 
+  /**
+   * Reload the extension when Omnia asked for it, and say so instead of looking frozen.
+   *
+   * Omnia's "Reload" button opens this page with ?omnia-reload=1 because that is the only
+   * route Chrome leaves open to an outside process: chrome:// URLs are dropped from the
+   * command line, and DevTools loadUnpacked is session-only. The flag written here survives
+   * into the fresh service worker, which reopens Settings — this page cannot, because
+   * chrome.runtime.reload() destroys it.
+   *
+   * @return {boolean} True when a reload was started and the page should not initialise.
+   */
+  function reloadIfOmniaAsked() {
+    let requested = false;
+    try {
+      requested = new URLSearchParams(location.search).get('omnia-reload') === '1';
+    } catch (err) {
+      return false;  // no URLSearchParams / no location: nothing was asked
+    }
+    if (!requested) return false;
+    document.body.textContent = 'Reloading the Omnia Web Clipper…';
+    // If the reload never brings Settings back, this page would otherwise sit on that line
+    // for ever with no route out. Offer one rather than leave the user stuck.
+    setTimeout(() => {
+      if (!document.body) return;
+      const link = document.createElement('a');
+      // A RELATIVE href, not chrome.runtime.getURL. This timer only fires when the page
+      // outlived chrome.runtime.reload(), which means the extension context is invalidated
+      // and every chrome.* call throws -- so getURL would throw here, in the one situation
+      // this block exists for, leaving the page stuck on "Reloading…" exactly as before.
+      link.href = 'options.html';
+      link.textContent = 'Reload did not finish — open Settings';
+      document.body.textContent = '';
+      document.body.appendChild(link);
+    }, REOPEN_FALLBACK_MS);
+    // Strip the parameter before reloading. If a future Chrome reloads this tab in place
+    // rather than closing it, ?omnia-reload=1 would re-trigger the handshake for ever.
+    if (window.history && window.history.replaceState) {
+      window.history.replaceState({}, '', 'options.html');
+    }
+    // A TIMESTAMP, not `true`: the worker uses it to tell a fresh request from one whose
+    // handoff was missed, which must decay instead of reopening Settings out of nowhere.
+    // Only reload once it is stored, or the fresh worker has nothing to act on.
+    chrome.storage.local.set({[REOPEN_OPTIONS_KEY]: Date.now()}, () => {
+      if (chrome.runtime.lastError) {
+        // Reloading now would destroy this page with nothing stored, so nothing would reopen
+        // Settings and the button would look like it did nothing at all. Say so instead.
+        document.body.textContent =
+          'Could not start the reload: ' + chrome.runtime.lastError.message;
+        return;
+      }
+      chrome.runtime.reload();
+    });
+    return true;
+  }
+
   document.addEventListener('DOMContentLoaded', () => {
+    if (reloadIfOmniaAsked()) return;
     el('saveBtn').addEventListener('click', onSave);
     el('testBtn').addEventListener('click', onTest);
     el('modelName').addEventListener('change', loadFieldsForCurrentModel);
