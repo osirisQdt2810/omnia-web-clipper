@@ -378,16 +378,20 @@ chrome.storage.local.get(REOPEN_OPTIONS_KEY, (stored) => {
     // A request older than the window is a handoff that was MISSED, not one to honour. The
     // worker can start hours later for reasons of its own, and opening Settings then would
     // ambush someone who has long forgotten pressing Reload.
-    if (Date.now() - askedAt > REOPEN_OPTIONS_TTL_MS) return;
-    // A reload tears down what a fresh install sets up, and neither onInstalled nor onStartup
-    // fires for one -- which is the whole reason this flag exists. Without these two calls the
-    // extension comes back LOOKING healthy (Settings opens) while both capture paths are dead:
-    // the context-menu item is gone, and every already-open tab's "+" fails with "Omnia was
-    // updated -- reload this page". Pressing a button labelled Reload must not cost the user
-    // the two things the extension is for. Both are idempotent, so this is also safe if a
-    // future Chrome does fire a lifecycle event.
+    // RESTORE FIRST, BEFORE the freshness check. A reload tears down what a fresh install
+    // sets up, and neither onInstalled nor onStartup fires for one -- which is the whole
+    // reason this flag exists. Without these two calls the extension comes back LOOKING
+    // healthy while both capture paths are dead: the context-menu item is gone, and every
+    // already-open tab's "+" fails with "Omnia was updated -- reload this page".
+    //
+    // An EXPIRED flag is not a reason to skip them; it is the case that needs them MOST. It
+    // means the reload did happen and this worker merely started late, so the torn-down state
+    // is real and nobody else is going to repair it. Only the Settings tab is gated on
+    // freshness, because opening a window half an hour later would ambush the user; silently
+    // repairing the extension never would. Both calls are idempotent.
     registerContextMenu();
     reinjectContentScript();
+    if (Date.now() - askedAt > REOPEN_OPTIONS_TTL_MS) return;
     chrome.runtime.openOptionsPage();
   });
 });

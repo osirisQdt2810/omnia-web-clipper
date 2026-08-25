@@ -167,6 +167,9 @@ function runOptions(search) {
     })}
   };
   sandbox.window = sandbox;
+  sandbox.history = {
+    replaceState: function () { chrome.calls.push('history.replaceState'); }
+  };
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(fs.readFileSync(path.join(SRC, 'options.js'), 'utf8'), sandbox);
@@ -279,11 +282,26 @@ const tests = {
     );
   },
 
-  'background: a stale request restores nothing': async function () {
+  'background: an EXPIRED request still repairs the extension': async function () {
     const chrome = await runBackgroundSettled({[REOPEN_KEY]: Date.now() - (TTL_MS + 1000)});
     assert.ok(
-      !chrome.calls.includes('contextMenus.create'),
-      'an expired request did work anyway; the point of expiring it is to do nothing'
+      chrome.calls.includes('contextMenus.create'),
+      'an expired flag skipped the repair. Expired means the reload DID happen and this ' +
+        'worker started late, so the torn-down state is real and nobody else will fix it.'
+    );
+    assert.ok(
+      !chrome.calls.includes('runtime.openOptionsPage'),
+      'only the Settings tab is gated on freshness; opening one half an hour later ambushes ' +
+        'the user, whereas repairing silently never does'
+    );
+  },
+
+  'options: the reload parameter is stripped before reloading': function () {
+    const result = runOptions('?omnia-reload=1');
+    assert.ok(
+      result.chrome.calls.includes('history.replaceState'),
+      'if a future Chrome reloads this tab in place rather than closing it, the parameter ' +
+        'would re-trigger the handshake for ever'
     );
   },
 

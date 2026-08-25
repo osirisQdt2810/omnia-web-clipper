@@ -279,7 +279,11 @@
     setTimeout(() => {
       if (!document.body) return;
       const link = document.createElement('a');
-      link.href = chrome.runtime.getURL('src/options.html');
+      // A RELATIVE href, not chrome.runtime.getURL. This timer only fires when the page
+      // outlived chrome.runtime.reload(), which means the extension context is invalidated
+      // and every chrome.* call throws -- so getURL would throw here, in the one situation
+      // this block exists for, leaving the page stuck on "Reloading…" exactly as before.
+      link.href = 'options.html';
       link.textContent = 'Reload did not finish — open Settings';
       document.body.textContent = '';
       document.body.appendChild(link);
