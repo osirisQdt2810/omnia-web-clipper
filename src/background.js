@@ -354,3 +354,44 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   // Returning true keeps the message channel open for the async sendResponse.
   return true;
 });
+
+// -- Reload handshake with the Omnia add-on ------------------------------------------------
+//
+// Omnia's Integrations tab has a "Reload" button. Chrome gives an outside process no way to
+// reload an unpacked extension -- chrome:// URLs are dropped from the command line, and
+// Extensions.loadUnpacked over DevTools is session-only -- but it does let one open an
+// extension's OWN page. So Omnia opens options.html with ?omnia-reload=1, that page sets the
+// flag below and calls chrome.runtime.reload(), and the service worker (which starts fresh
+// straight afterwards, running this file top to bottom) finds the flag and reopens Settings.
+//
+// The flag is what carries intent ACROSS the reload: the page that asked is destroyed by the
+// reload it triggers, so it cannot reopen anything itself. Neither onInstalled nor onStartup
+// fires for a plain reload, which is why this is top-level rather than in a listener.
+const {REOPEN_OPTIONS_KEY, REOPEN_OPTIONS_TTL_MS} = self.OmniaClipper;
+
+chrome.storage.local.get(REOPEN_OPTIONS_KEY, (stored) => {
+  const askedAt = stored && stored[REOPEN_OPTIONS_KEY];
+  if (chrome.runtime.lastError || !askedAt) return;
+  // Clear FIRST: a failure to open must not leave a flag that reopens Settings on every
+  // later service-worker start, which the browser does on its own schedule.
+  chrome.storage.local.remove(REOPEN_OPTIONS_KEY, () => {
+    // A request older than the window is a handoff that was MISSED, not one to honour. The
+    // worker can start hours later for reasons of its own, and opening Settings then would
+    // ambush someone who has long forgotten pressing Reload.
+    // RESTORE FIRST, BEFORE the freshness check. A reload tears down what a fresh install
+    // sets up, and neither onInstalled nor onStartup fires for one -- which is the whole
+    // reason this flag exists. Without these two calls the extension comes back LOOKING
+    // healthy while both capture paths are dead: the context-menu item is gone, and every
+    // already-open tab's "+" fails with "Omnia was updated -- reload this page".
+    //
+    // An EXPIRED flag is not a reason to skip them; it is the case that needs them MOST. It
+    // means the reload did happen and this worker merely started late, so the torn-down state
+    // is real and nobody else is going to repair it. Only the Settings tab is gated on
+    // freshness, because opening a window half an hour later would ambush the user; silently
+    // repairing the extension never would. Both calls are idempotent.
+    registerContextMenu();
+    reinjectContentScript();
+    if (Date.now() - askedAt > REOPEN_OPTIONS_TTL_MS) return;
+    chrome.runtime.openOptionsPage();
+  });
+});

@@ -118,7 +118,19 @@
     return data ? data.result : undefined;
   }
 
+  // -- Omnia reload handshake ------------------------------------------------------------
+  // Both halves live in different files (options.js asks, background.js answers) and are
+  // loaded into different contexts, so the key is defined ONCE here: a typo in either copy
+  // would break the handshake silently, with each half looking correct on its own.
+  const REOPEN_OPTIONS_KEY = 'omniaReopenOptionsAfterReload';
+  // How long the request stays valid. If the handoff is missed -- the reload never happened,
+  // or the worker did not start -- the flag must DECAY rather than lie in wait and reopen
+  // Settings out of nowhere the next time the browser happens to start the worker.
+  const REOPEN_OPTIONS_TTL_MS = 30000;
+
   root.OmniaClipper = {
+    REOPEN_OPTIONS_KEY: REOPEN_OPTIONS_KEY,
+    REOPEN_OPTIONS_TTL_MS: REOPEN_OPTIONS_TTL_MS,
     DEFAULTS: DEFAULTS,
     loadSettings: loadSettings,
     saveSettings: saveSettings,
