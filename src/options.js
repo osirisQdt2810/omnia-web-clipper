@@ -249,7 +249,34 @@
     }
   }
 
+  /**
+   * Reload the extension when Omnia asked for it, and say so instead of looking frozen.
+   *
+   * Omnia's "Reload" button opens this page with ?omnia-reload=1 because that is the only
+   * route Chrome leaves open to an outside process: chrome:// URLs are dropped from the
+   * command line, and DevTools loadUnpacked is session-only. The flag written here survives
+   * into the fresh service worker, which reopens Settings — this page cannot, because
+   * chrome.runtime.reload() destroys it.
+   *
+   * @return {boolean} True when a reload was started and the page should not initialise.
+   */
+  function reloadIfOmniaAsked() {
+    let requested = false;
+    try {
+      requested = new URLSearchParams(location.search).get('omnia-reload') === '1';
+    } catch (err) {
+      return false;  // no URLSearchParams / no location: nothing was asked
+    }
+    if (!requested) return false;
+    document.body.textContent = 'Reloading the Omnia Web Clipper…';
+    const key = 'omniaReopenOptionsAfterReload';
+    // Only reload once the flag is stored, or the fresh worker has nothing to act on.
+    chrome.storage.local.set({[key]: true}, () => chrome.runtime.reload());
+    return true;
+  }
+
   document.addEventListener('DOMContentLoaded', () => {
+    if (reloadIfOmniaAsked()) return;
     el('saveBtn').addEventListener('click', onSave);
     el('testBtn').addEventListener('click', onTest);
     el('modelName').addEventListener('change', loadFieldsForCurrentModel);

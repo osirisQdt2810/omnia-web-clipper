@@ -354,3 +354,26 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   // Returning true keeps the message channel open for the async sendResponse.
   return true;
 });
+
+// -- Reload handshake with the Omnia add-on ------------------------------------------------
+//
+// Omnia's Integrations tab has a "Reload" button. Chrome gives an outside process no way to
+// reload an unpacked extension -- chrome:// URLs are dropped from the command line, and
+// Extensions.loadUnpacked over DevTools is session-only -- but it does let one open an
+// extension's OWN page. So Omnia opens options.html with ?omnia-reload=1, that page sets the
+// flag below and calls chrome.runtime.reload(), and the service worker (which starts fresh
+// straight afterwards, running this file top to bottom) finds the flag and reopens Settings.
+//
+// The flag is what carries intent ACROSS the reload: the page that asked is destroyed by the
+// reload it triggers, so it cannot reopen anything itself. Neither onInstalled nor onStartup
+// fires for a plain reload, which is why this is top-level rather than in a listener.
+const OMNIA_REOPEN_OPTIONS_KEY = 'omniaReopenOptionsAfterReload';
+
+chrome.storage.local.get(OMNIA_REOPEN_OPTIONS_KEY, (stored) => {
+  if (chrome.runtime.lastError || !stored || !stored[OMNIA_REOPEN_OPTIONS_KEY]) return;
+  // Clear FIRST: a failure to open must not leave a flag that reopens Settings on every
+  // later service-worker start, which the browser does on its own schedule.
+  chrome.storage.local.remove(OMNIA_REOPEN_OPTIONS_KEY, () => {
+    if (chrome.runtime.openOptionsPage) chrome.runtime.openOptionsPage();
+  });
+});
