@@ -68,23 +68,32 @@ function makeChrome(initialStorage) {
     },
     contextMenus: {
       onClicked: {addListener: function () {}},
-      removeAll: function (cb) { if (cb) cb(); }
+      removeAll: function (cb) { calls.push('contextMenus.removeAll'); if (cb) cb(); },
+      create: function () { calls.push('contextMenus.create'); }
     },
     tabs: {
-      query: function () { return Promise.resolve([]); },
+      // One open tab, so re-injection has something to act on and is observable.
+      query: function () { calls.push('tabs.query'); return Promise.resolve([{id: 42}]); },
       create: function () { calls.push('tabs.create'); }
     },
-    scripting: {executeScript: function () { return Promise.resolve(); }}
+    scripting: {
+      executeScript: function (arg) {
+        calls.push('scripting.executeScript:' + ((arg && arg.files) || []).join(','));
+        return Promise.resolve();
+      }
+    }
   };
 }
 
 /** Evaluate background.js top-level with a mock chrome, and return what it did. */
 function runBackground(initialStorage) {
   const chrome = makeChrome(initialStorage);
-  const selfObj = {OmniaClipper: Object.assign({
+  // shared.js FIRST, stubs second: the real loadSettings reaches chrome.storage.sync, which
+  // this mock does not provide, so it must be the one that gets overridden.
+  const selfObj = {OmniaClipper: Object.assign({}, sharedExports(), {
     loadSettings: async function () { return {}; },
     ankiConnect: async function () { return {}; }
-  }, sharedExports())};
+  })};
   const sandbox = {
     chrome: chrome,
     self: selfObj,
@@ -100,6 +109,13 @@ function runBackground(initialStorage) {
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(fs.readFileSync(path.join(SRC, 'background.js'), 'utf8'), sandbox);
+  return chrome;
+}
+
+/** Same, but drained: reinjectContentScript is async, so let its microtasks run. */
+async function runBackgroundSettled(initialStorage) {
+  const chrome = runBackground(initialStorage);
+  await new Promise(function (resolve) { setTimeout(resolve, 0); });
   return chrome;
 }
 
@@ -144,11 +160,11 @@ function runOptions(search) {
     // options.js destructures these out of `self.OmniaClipper`, which shared.js normally
     // defines. The reload branch runs before any of them is called, so stubs are enough.
     Date: Date,
-    self: {OmniaClipper: Object.assign({
+    self: {OmniaClipper: Object.assign({}, sharedExports(), {
       loadSettings: async function () { return {}; },
       saveSettings: async function () {},
       ankiConnect: async function () { return {}; }
-    }, sharedExports())}
+    })}
   };
   sandbox.window = sandbox;
   sandbox.globalThis = sandbox;
@@ -249,6 +265,28 @@ const tests = {
     assert.ok(chrome.calls.includes('runtime.openOptionsPage'), 'a fresh request was dropped');
   },
 
+  'background: a reload RESTORES the context menu and the content scripts': async function () {
+    const chrome = await runBackgroundSettled({[REOPEN_KEY]: Date.now() - 1000});
+    assert.ok(
+      chrome.calls.includes('contextMenus.create'),
+      'the right-click "Send to Anki (Omnia)" item was not re-created. A reload drops it and ' +
+        'neither onInstalled nor onStartup fires for one, so capture path #2 is simply gone.'
+    );
+    assert.ok(
+      chrome.calls.some(function (c) { return c.indexOf('scripting.executeScript') === 0; }),
+      'open tabs were not re-injected, so every already-open page "+" fails with "Omnia was ' +
+        'updated - reload this page" until the user refreshes it'
+    );
+  },
+
+  'background: a stale request restores nothing': async function () {
+    const chrome = await runBackgroundSettled({[REOPEN_KEY]: Date.now() - (TTL_MS + 1000)});
+    assert.ok(
+      !chrome.calls.includes('contextMenus.create'),
+      'an expired request did work anyway; the point of expiring it is to do nothing'
+    );
+  },
+
   'the two halves share ONE key definition': function () {
     const shared = sharedExports();
     assert.strictEqual(shared.REOPEN_OPTIONS_KEY, REOPEN_KEY);
@@ -266,14 +304,17 @@ const tests = {
 
 let failed = 0;
 const names = Object.keys(tests);
-for (const name of names) {
-  try {
-    tests[name]();
-    console.log('  ok   ' + name);
-  } catch (err) {
-    failed += 1;
-    console.error('  FAIL ' + name + '\n       ' + err.message);
+
+(async function () {
+  for (const name of names) {
+    try {
+      await tests[name]();
+      console.log('  ok   ' + name);
+    } catch (err) {
+      failed += 1;
+      console.error('  FAIL ' + name + '\n       ' + err.message);
+    }
   }
-}
-console.log(failed ? '\n' + failed + ' failing' : '\n' + names.length + ' passing');
-process.exit(failed ? 1 : 0);
+  console.log(failed ? '\n' + failed + ' failing' : '\n' + names.length + ' passing');
+  process.exit(failed ? 1 : 0);
+})();

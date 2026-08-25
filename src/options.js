@@ -16,8 +16,10 @@
 
   const {loadSettings, saveSettings, ankiConnect, REOPEN_OPTIONS_KEY} =
     self.OmniaClipper;
-  // How long to wait before admitting the reload did not come back.
-  const REOPEN_FALLBACK_MS = 5000;
+  // How long to wait before admitting the reload did not come back. Deliberately LONGER than
+  // the worker's own validity window: offering the link sooner means a merely SLOW reload ends
+  // with two Settings tabs, one from the click and one from the worker.
+  const REOPEN_FALLBACK_MS = self.OmniaClipper.REOPEN_OPTIONS_TTL_MS + 5000;
 
   const CAPTURE_KEYS = [
     'selection',
@@ -282,13 +284,24 @@
       document.body.textContent = '';
       document.body.appendChild(link);
     }, REOPEN_FALLBACK_MS);
+    // Strip the parameter before reloading. If a future Chrome reloads this tab in place
+    // rather than closing it, ?omnia-reload=1 would re-trigger the handshake for ever.
+    if (window.history && window.history.replaceState) {
+      window.history.replaceState({}, '', 'options.html');
+    }
     // A TIMESTAMP, not `true`: the worker uses it to tell a fresh request from one whose
     // handoff was missed, which must decay instead of reopening Settings out of nowhere.
     // Only reload once it is stored, or the fresh worker has nothing to act on.
-    chrome.storage.local.set(
-      {[REOPEN_OPTIONS_KEY]: Date.now()},
-      () => chrome.runtime.reload()
-    );
+    chrome.storage.local.set({[REOPEN_OPTIONS_KEY]: Date.now()}, () => {
+      if (chrome.runtime.lastError) {
+        // Reloading now would destroy this page with nothing stored, so nothing would reopen
+        // Settings and the button would look like it did nothing at all. Say so instead.
+        document.body.textContent =
+          'Could not start the reload: ' + chrome.runtime.lastError.message;
+        return;
+      }
+      chrome.runtime.reload();
+    });
     return true;
   }
 
