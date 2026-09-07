@@ -869,6 +869,42 @@ const tests = {
       );
     });
   },
+
+  // can_regenerate:false has two causes and only one of them names a control the user can
+  // reach: with Smart Notes disabled the "Regenerate from clippers" checkbox does not exist,
+  // so sending them to hunt for it is a dead end wearing the clothes of a remedy. The payload
+  // says which, and these pin that the panel reads it.
+  'the refusal names Smart Notes when Smart Notes is what is missing': function () {
+    const result = twoNoteResult();
+    result.can_regenerate = false;
+    result.regenerate_reason = 'unavailable';
+    const model = view.buildPanelModel(result, 0, {});
+
+    assert.strictEqual(model.generateAll.title, view.REGENERATE_UNAVAILABLE_MESSAGE);
+    assert.ok(/Smart Notes/.test(model.fields[0].title));
+    assert.ok(
+      !/Regenerate from clippers/.test(model.fields[0].title),
+      'that checkbox is not reachable while Smart Notes is off'
+    );
+  },
+
+  'the refusal names the checkbox when the checkbox is what is off': function () {
+    const result = twoNoteResult();
+    result.can_regenerate = false;
+    result.regenerate_reason = 'off';
+    const model = view.buildPanelModel(result, 0, {});
+
+    assert.strictEqual(model.generateAll.title, view.REGENERATE_OFF_MESSAGE);
+    assert.ok(/Regenerate from clippers/.test(model.fields[0].title));
+  },
+
+  'an older Omnia that sends no reason still names a real control': function () {
+    const result = twoNoteResult();
+    result.can_regenerate = false;
+    const model = view.buildPanelModel(result, 0, {});
+
+    assert.strictEqual(model.generateAll.title, view.REGENERATE_OFF_MESSAGE);
+  },
 };
 
 let failed = 0;
