@@ -94,9 +94,12 @@ from AnkiConnect:
 - **Lookup service URL** — where Omnia's own loopback service listens; default
   `http://127.0.0.1:8766`. This is *not* AnkiConnect.
 - **Omnia access token** — needed only to **regenerate** fields from the lookup panel. Copy it
-  from Anki (**Tools → Omnia → Smart Notes → Configure → Integrations**); Omnia can also fill it
-  in for you by opening this page with the token in the URL. Looking a word up needs no token;
-  regenerating does, because it rewrites the note and spends your LLM credits.
+  from Anki (**Tools → Omnia → Word Lookup → Configure…**, the *Clipper access token* box —
+  Omnia issues it the first time Word Lookup is enabled); Omnia can also fill it in for you by
+  opening this page with the token in the URL. Looking a word up needs no token; regenerating
+  does, because it rewrites the note and spends your LLM credits. It is kept in
+  `chrome.storage.local`, **not** synced: it authenticates against a loopback service on *this*
+  machine, and every machine's Omnia issues its own.
 
 ---
 
@@ -164,17 +167,18 @@ clipper uses `omnia-desktop-clipper` with its own toggle.)
 - **"+" doesn't appear** → the extension can't inject into some pages (e.g. `chrome://` pages, the
   Web Store, PDFs opened in the built-in viewer). Reload the page after installing/updating.
 - **Regenerating says "Regenerate from clippers" is off** → turn that option on in **Tools → Omnia
-  → Smart Notes → Configure → Integrations**, then look the word up again.
+  → Smart Notes → Configure → Options → General**, then look the word up again.
 - **Regenerating says Smart Notes is not available** → the Smart Notes plugin is off in **Tools →
   Omnia**, or Anki is busy with something else. Enable it and retry.
-- **Regenerating says Omnia rejected the token** → paste the token from **Tools → Omnia → Smart
-  Notes → Configure → Integrations** into Options.
-- **Regenerating says Omnia refused the request because of an `Origin` header** → this one cannot
-  be fixed in the extension. Chrome attaches `Origin: chrome-extension://<id>` to every
-  cross-origin request an extension makes, and `Origin` is a forbidden header name that JavaScript
-  can neither set nor remove; the add-on has to allow this extension explicitly. Until it does,
-  regenerate from the desktop clipper or from Anki itself. (Looking a word up is unaffected — the
-  add-on does not gate reads on the header.)
+- **Regenerating says Omnia rejected the token** → paste the token from **Tools → Omnia → Word
+  Lookup → Configure…** (the *Clipper access token* box) into Options.
+- **Regenerating says Omnia refused the request (403)** → the add-on accepts `/generate` from an
+  extension (any `chrome-extension://` origin, by scheme) but never from a web page, so a 403 here
+  means the request did not come from this extension's service worker. Reload the extension on
+  `chrome://extensions` and retry; if it persists, regenerate from Anki itself and open an issue.
+  (Looking a word up is unaffected — the add-on does not gate reads on the header.)
+- **Regenerating gives up after 5 minutes** → the request is budgeted like the desktop clipper's.
+  Omnia may well finish it anyway; look the word up again to see what the note holds.
 
 ---
 

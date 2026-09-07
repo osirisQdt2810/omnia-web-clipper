@@ -7,8 +7,9 @@
  * classic script does.
  *
  * What is checked here is the part a screenshot cannot: which note the switcher points at, why
- * a field says it cannot be regenerated, which fields an answer is allowed to touch, and
- * whether an HTTP failure comes out as a sentence someone can act on.
+ * a field says it cannot be regenerated, which fields an answer is allowed to touch, which NOTE
+ * an answer belongs to when the user has moved on, and whether an HTTP failure comes out as a
+ * sentence someone can act on.
  */
 
 'use strict';
@@ -80,6 +81,41 @@ function twoNoteResult() {
         fields: [
           {name: 'Meaning', text: '', audio: [], images: [], empty: true, state: 'no_rule'},
         ],
+      },
+    ],
+  };
+}
+
+/**
+ * Two matches that share a field name.
+ *
+ * The cruel case for note-keyed state: when both notes have an "Audio", a message that leaks
+ * from one to the other does not look like a bug at all — it looks like an answer.
+ */
+function twinNoteResult() {
+  return {
+    word: 'run',
+    found: true,
+    can_regenerate: true,
+    cards: [
+      {
+        note_id: 11,
+        note_type: 'Vocabulary',
+        deck: 'English::Verbs',
+        title: 'run (verb)',
+        state: 'review',
+        fields: [
+          {name: 'Audio', text: '', audio: [], images: [], empty: true, state: 'ready'},
+          {name: 'Example', text: '', audio: [], images: [], empty: true, state: 'ready'},
+        ],
+      },
+      {
+        note_id: 22,
+        note_type: 'Vocabulary',
+        deck: 'English::Nouns',
+        title: 'run (noun)',
+        state: 'new',
+        fields: [{name: 'Audio', text: '', audio: [], images: [], empty: true, state: 'ready'}],
       },
     ],
   };
@@ -327,6 +363,198 @@ const tests = {
     );
   },
 
+  // -- the panel's state, which is where the note switch used to lose track of a request -----
+
+  'an answer for the note you left does not land on the note you are reading': function () {
+    const state = new view.PanelState('run', twinNoteResult(), null);
+    state.regeneration.start(11, ['Audio']);
+    assert.strictEqual(state.showNote(1), true, 'the switcher must move to the second match');
+
+    // Note 11's answer arrives NOW, while note 22 is the one on screen. Both have an "Audio".
+    state.applyAnswer(11, ['Audio'], [
+      {field: 'Audio', status: 'blocked', message: 'needs Definition'},
+    ]);
+
+    const shown = state.model();
+    assert.strictEqual(shown.noteId, 22, 'the panel moved off the note that was generating');
+    assert.strictEqual(
+      field(shown, 'Audio').note,
+      '',
+      'note 11 was told its Audio needs a Definition, and the reason was printed under note ' +
+        "22's Audio — a sentence about a note the user is not even looking at"
+    );
+    assert.deepStrictEqual(shown.extraNotes, [], 'nor as a loose line under the note');
+    assert.strictEqual(shown.error, '', 'nor as a panel-wide failure');
+
+    state.showNote(0);
+    assert.strictEqual(
+      field(state.model(), 'Audio').note,
+      'needs Definition',
+      'the answer still has to be there for the note it was actually about'
+    );
+  },
+
+  "a note's in-flight run survives being switched away from": function () {
+    const state = new view.PanelState('run', twinNoteResult(), null);
+    state.regeneration.start(11, ['Audio']);
+    state.showNote(1);
+
+    assert.deepStrictEqual(
+      state.regeneration.busy(11),
+      ['Audio'],
+      'switching notes cleared the marker of a request that is still in flight'
+    );
+    assert.strictEqual(
+      state.regeneration.canStart(11, ['Audio']),
+      false,
+      'with the marker gone the button comes back to life, and a second press pays for the ' +
+        'same generation twice'
+    );
+    assert.strictEqual(
+      field(state.model(), 'Audio').busy,
+      false,
+      "note 22 is not generating, so its Audio must not spin on note 11's account"
+    );
+
+    state.showNote(0);
+    assert.strictEqual(
+      field(state.model(), 'Audio').busy,
+      true,
+      'and the spinner is still there on the note that IS generating'
+    );
+  },
+
+  'two notes may generate at once; one field of one note may not run twice': function () {
+    const regen = new view.RegenerationState();
+    regen.start(11, ['Audio']);
+
+    assert.strictEqual(
+      regen.canStart(22, ['Audio']),
+      true,
+      'two notes are two requests against two notes; the panel can only send them by ' +
+        'switching, and refusing the second would make the switcher a trap'
+    );
+    assert.strictEqual(
+      regen.canStart(11, ['Audio']),
+      false,
+      'the same field of the same note is ONE generation — a second request pays twice'
+    );
+    assert.strictEqual(
+      regen.canStart(11, ['Example']),
+      true,
+      'a different field of the same note is a different generation'
+    );
+    assert.strictEqual(
+      regen.canStart(11, null),
+      false,
+      '"Generate all" covers the field already running, so it waits for the note'
+    );
+
+    regen.settle(11, ['Audio'], {});
+    assert.strictEqual(regen.canStart(11, ['Audio']), true, 'an answered field may be asked again');
+  },
+
+  'a whole-note run holds the note, and settles all of it': function () {
+    const regen = new view.RegenerationState();
+    regen.start(11, null);
+    assert.strictEqual(regen.busy(11), 'all', 'every field of the note spins for "Generate all"');
+    assert.strictEqual(regen.canStart(11, ['Audio']), false);
+    assert.strictEqual(regen.canStart(22, null), true, 'a different note is untouched');
+
+    regen.settle(11, null, {Audio: 'needs Definition'});
+    assert.deepStrictEqual(
+      regen.busy(11),
+      [],
+      'a whole-note request asked for every field, so a field the answer never named has to ' +
+        'stop spinning too — otherwise it spins for ever'
+    );
+    assert.strictEqual(regen.messages(11).Audio, 'needs Definition');
+  },
+
+  'a failed request reports on its own note, in the right place': function () {
+    const regen = new view.RegenerationState();
+    regen.start(11, ['Audio']);
+    regen.start(22, null);
+
+    regen.fail(11, ['Audio'], 'Omnia did not answer.');
+    assert.strictEqual(regen.messages(11).Audio, 'Omnia did not answer.');
+    assert.strictEqual(regen.error(11), '', 'a single-field failure belongs under that field');
+    assert.deepStrictEqual(
+      regen.messages(22),
+      {},
+      "note 22 must learn nothing about a request that was not about it"
+    );
+    assert.strictEqual(regen.busy(22), 'all', "and its own run must not be settled by note 11's");
+
+    regen.fail(22, null, 'Smart Notes is not available right now.');
+    assert.strictEqual(
+      regen.error(22),
+      'Smart Notes is not available right now.',
+      'a whole-note failure has nowhere to sit but the note'
+    );
+    assert.strictEqual(regen.error(11), '', 'and not on any other note');
+  },
+
+  'asking again drops the reason the last answer gave': function () {
+    const regen = new view.RegenerationState();
+    regen.setMessage(11, 'Audio', 'needs Definition');
+    regen.setError(11, 'Regenerating is switched off.');
+    regen.start(11, ['Audio']);
+    assert.deepStrictEqual(
+      regen.messages(11),
+      {},
+      'leaving "needs Definition" under a spinner claims an answer that no longer applies'
+    );
+    assert.strictEqual(regen.error(11), '', 'and the same goes for the note-wide reason');
+  },
+
+  'the model draws the note on screen, with that note\'s state': function () {
+    const state = new view.PanelState('run', twinNoteResult(), {selection: 'run'});
+    state.regeneration.setMessage(11, 'Audio', 'note 11 says so');
+    state.regeneration.setError(22, 'note 22 says so');
+
+    const first = state.model();
+    assert.strictEqual(field(first, 'Audio').note, 'note 11 says so');
+    assert.strictEqual(first.error, '', "note 22's panel message is not note 11's");
+    assert.strictEqual(first.canAdd, true, 'the capture is in hand, so "Add to Anki" is offered');
+
+    state.showNote(1);
+    const second = state.model();
+    assert.strictEqual(second.error, 'note 22 says so');
+    assert.strictEqual(field(second, 'Audio').note, '', 'and note 11\'s message stayed behind');
+  },
+
+  'switching to nowhere is not a switch': function () {
+    const state = new view.PanelState('run', twinNoteResult(), null);
+    assert.strictEqual(state.showNote(0), false, 'the note already on screen has not changed');
+    assert.strictEqual(state.showNote(9), false, 'there is no ninth match to show');
+    assert.strictEqual(state.showNote(-1), false);
+    assert.strictEqual(state.index, 0, 'and none of that moved the panel');
+    assert.strictEqual(state.noteId(), 11);
+  },
+
+  'a fresher answer keeps the reader on the same NOTE, not the same slot': function () {
+    const state = new view.PanelState('run', twinNoteResult(), null);
+    state.showNote(1);
+    assert.strictEqual(state.noteId(), 22);
+
+    // The lookup is run again (a lost /generate answer) and comes back ordered differently.
+    const fresher = twinNoteResult();
+    fresher.cards.reverse();
+    state.adoptResult(fresher);
+    assert.strictEqual(
+      state.noteId(),
+      22,
+      'the reader was moved to a different note by a refresh they did not ask for'
+    );
+
+    // And a note that has GONE falls back to the first match rather than to nothing.
+    const without = twinNoteResult();
+    without.cards = [without.cards[0]];
+    state.adoptResult(without);
+    assert.strictEqual(state.noteId(), 11);
+  },
+
   'a message about a field the panel does not show is still surfaced': function () {
     // "Generate all" runs over the whole note; a lookup only shows the top few fields.
     const model = view.buildPanelModel(twoNoteResult(), 0, {
@@ -420,6 +648,22 @@ const tests = {
     );
   },
 
+  'a note with no id is not offered an "Open in Anki" that cannot work': function () {
+    const result = twoNoteResult();
+    delete result.cards[0].note_id;
+    const html = render(result, 0, {});
+    assert.ok(
+      html.indexOf('data-omnia-open') === -1,
+      '"Open in Anki" reveals the note by `nid:<id>`, so without one the button can only ask ' +
+        'Anki for `nid:NaN`. A control guaranteed to fail teaches nothing but that it fails.'
+    );
+    assert.ok(html.indexOf('data-omnia-generate="Definition"') !== -1, 'the rest still renders');
+    assert.ok(
+      render(twoNoteResult(), 0, {}).indexOf('data-omnia-open="11"') !== -1,
+      'and a real note still gets the button'
+    );
+  },
+
   'the not-found state offers to add the word, but only with a capture in hand': function () {
     const missing = {word: 'zzz', found: false, cards: []};
     const offered = render(missing, 0, {word: 'zzz', canAdd: true});
@@ -484,15 +728,73 @@ const tests = {
     assert.ok(!/409/.test(conflict), 'a bare status code is not something a person can act on');
   },
 
-  '401 and 403 explain themselves too': function () {
+  '401 sends the user where the token actually IS': function () {
+    const message = shared.generateErrorMessage(401, null);
+    assert.ok(/token/i.test(message), '401 is the token; the message must say so');
     assert.ok(
-      /token/i.test(shared.generateErrorMessage(401, null)),
-      '401 is the token; the message must say where to get one'
+      /Word Lookup/.test(message),
+      'the token is shown in Anki under Tools → Omnia → Word Lookup → Configure…, and NOWHERE ' +
+        'else. Smart Notes → Integrations holds Lookup…/Install/Reload and no token at all, ' +
+        'so sending someone there is sending them to look for something that is not there: ' +
+        message
+    );
+  },
+
+  '403 says something that is true, and something that can be done': function () {
+    const message = shared.generateErrorMessage(403, null);
+    assert.ok(
+      !/allow this extension/.test(message),
+      'the add-on allows EVERY chrome-extension:// origin, by scheme and deliberately (the id ' +
+        'differs between an unpacked load and a Web Store install). "The add-on has to allow ' +
+        'this extension explicitly" describes an allowlist that does not exist: ' + message
     );
     assert.ok(
-      /Origin/.test(shared.generateErrorMessage(403, null)),
-      '403 is the Origin header the browser attaches — the one failure the user cannot fix ' +
-        'in this extension, so it must say who can'
+      /background worker|service worker/.test(message),
+      'a 403 reaching this extension means the request was not the one the service worker ' +
+        'makes — that is what the message has to say, because it is the only true thing ' +
+        'about it: ' + message
+    );
+  },
+
+  'no message sends anyone to Integrations for the token': function () {
+    // Three files and a README repeated the same wrong route, and each looked plausible alone.
+    // options.html is in the list because it is where the token is actually typed: a hint that
+    // names the wrong menu there is the one the user reads at exactly the wrong moment.
+    const sources = ['shared.js', 'lookup_view.js', 'content.js', 'options.html'].map(
+      function (name) {
+        return {name: name, text: fs.readFileSync(path.join(SRC, name), 'utf8')};
+      }
+    );
+    sources.push({
+      name: 'README.md',
+      text: fs.readFileSync(path.join(SRC, '..', 'README.md'), 'utf8'),
+    });
+    sources.forEach(function (source) {
+      // `&rarr;` too, or the HTML page — the one place the token is actually typed — would
+      // sail through a check written for the arrow character.
+      const flat = source.text.replace(/&rarr;/g, '→').replace(/\s+/g, ' ');
+      assert.ok(
+        !/token[\s\S]{0,200}?Smart Notes → Configure → Integrations/.test(flat),
+        source.name + ' tells the user to fetch the token from the Smart Notes Integrations ' +
+          'tab. That card has Lookup… / Install / Reload on it and nothing else; the token is ' +
+          'in Tools → Omnia → Word Lookup → Configure….'
+      );
+    });
+  },
+
+  'the "Regenerate from clippers" remedy names the tab that holds it': function () {
+    // The switch is on the GENERAL tab of Smart Notes' options (sn-opt-regen-clippers sits in
+    // the general pane, and omnia's own word_lookup message says "Smart Notes → General"). The
+    // Integrations tab holds the per-clipper integration toggles and nothing else, so a user
+    // sent there finds a list of clippers with no switch of that name anywhere on it.
+    [view.REGENERATE_OFF_MESSAGE, shared.generateErrorMessage(409, null)].forEach(
+      function (message) {
+        assert.ok(/Regenerate from clippers/.test(message), message);
+        assert.ok(
+          /General/.test(message) && !/Integrations/.test(message),
+          'the remedy points at the wrong tab: ' + message
+        );
+      }
     );
   },
 
@@ -513,11 +815,18 @@ const tests = {
     assert.strictEqual(shared.readTokenFromSearch('?other=1'), '');
   },
 
-  'the token has a default, so storage.sync.get always returns one': function () {
+  'the token has a default, so a fresh profile reads "" and not undefined': function () {
     assert.strictEqual(
       shared.DEFAULTS.lookupToken,
       '',
-      'a key missing from DEFAULTS never comes back from chrome.storage.sync.get(DEFAULTS)'
+      'a key missing from DEFAULTS never comes back from chrome.storage.get(DEFAULTS)'
+    );
+    assert.deepStrictEqual(
+      shared.LOCAL_KEYS,
+      ['lookupToken'],
+      'the token is the one setting that must NOT be synced: it authenticates against a ' +
+        "loopback service on this machine, issued by this machine's Omnia, so syncing it " +
+        'uploads a secret to Google and copies it into profiles where it cannot work'
     );
   },
 
@@ -538,6 +847,27 @@ const tests = {
       'the renderer re-worded the reason instead of showing the one lookup_view.js defines; ' +
         'two copies drift, and the tests only pin one of them'
     );
+  },
+
+  'every control the panel wires is a control the panel draws': function () {
+    // Wiring an attribute the renderer never emits is a promise to a reader that some control
+    // exists. [data-omnia-close] was wired for a close button that was never drawn.
+    const content = fs.readFileSync(path.join(SRC, 'content.js'), 'utf8');
+    const markup =
+      view.renderPanel(view.buildPanelModel(twoNoteResult(), 0, {canAdd: true})) +
+      view.renderPanel(view.buildPanelModel({word: 'zzz', cards: []}, 0, {canAdd: true})) +
+      view.renderField({name: 'X', text: '', audio: ['a.mp3'], images: ['b.png'], busy: false,
+        canGenerate: true, title: '', note: '', empty: false});
+    const wired = (content.match(/\[data-omnia-[a-z-]+\]/g) || []).map(function (selector) {
+      return selector.slice(1, -1);
+    });
+    assert.ok(wired.length >= 6, 'the panel wires its controls by data attribute: ' + wired);
+    wired.forEach(function (attribute) {
+      assert.ok(
+        markup.indexOf(attribute + '=') !== -1,
+        'content.js binds a handler to [' + attribute + '], which renderPanel never emits'
+      );
+    });
   },
 };
 

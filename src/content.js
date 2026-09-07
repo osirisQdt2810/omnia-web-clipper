@@ -169,11 +169,10 @@
   // browser selection before we read it.
   let pendingCapture = null;
 
-  // What the open panel is showing. Held so a note switch and a regeneration can re-render
-  // from the payload already in hand instead of asking Anki again:
-  //   {word, capture, result, index, notes: {field: message}, busy, error}
-  // `busy` is 'all', an array of field names, or null. `notes` and `error` are what the last
-  // /generate answer said; they belong to ONE note, so switching notes clears them.
+  // What the open panel is showing: a LookupView.PanelState, or null when no panel is open. It
+  // holds the answer in hand (so a note switch re-renders without asking Anki again) and, keyed
+  // by note id, what each matched note is generating and what Omnia said about it. All of that
+  // lives in lookup_view.js, where it is testable; this file only drives it.
   let panelState = null;
 
   // Cached enable flags so the (frequent) selection handler stays synchronous.
@@ -201,13 +200,18 @@
     }
   }
 
-  /** Detach on a dead context: remove the "+" and stop the selection handlers firing. */
+  /** Detach on a dead context: remove our UI and stop the selection handlers firing. */
   function handleContextGone() {
     if (contextGone) {
       return;
     }
     contextGone = true;
     removeTooltip();
+    // The panel goes too. It is not merely stale UI: ensurePanelHost ADOPTS an existing host by
+    // id, so a panel left behind by this dead instance would be inherited whole -- handlers,
+    // shadow root and all -- by the instance a re-injection starts, which then draws a live
+    // answer into a node wired to a context that can no longer talk to Anki.
+    removePanel();
     document.removeEventListener('mouseup', onSelectionEvent, true);
     document.removeEventListener('dblclick', onSelectionEvent, true);
     document.removeEventListener('scroll', removeTooltip, true);
@@ -227,6 +231,13 @@
   }
 
   const RELOAD_MSG = 'Omnia was updated — reload this page (F5) to keep clipping.';
+  // A regeneration whose answer never came back. Chrome terminates an idle MV3 service worker
+  // on its own schedule, including mid-fetch, and Omnia goes on generating either way -- so
+  // this is NOT "the extension was updated, reload the page": the page is fine, and the work
+  // may well have succeeded. Saying the wrong one of those sends the user to fix nothing.
+  const LOST_ANSWER_MSG =
+    'Omnia never answered this request — it may still be generating. ' +
+    'Looking the word up again to show what the note holds now.';
 
   // -------------------------------------------------------------------------
   // Enable flags (master toggle + double-click toggle)
@@ -470,6 +481,11 @@
     panelState = null;
   }
 
+  /** @return {boolean} Whether a lookup panel is on screen right now. */
+  function panelIsOpen() {
+    return !!document.getElementById(PANEL_ID);
+  }
+
   /**
    * Show the "+" button near the selection's bounding rectangle.
    * @param {!Object} capture The capture payload to attach to the button.
@@ -652,11 +668,19 @@
     showPanel(LookupView.renderLoading(word), word);
     try {
       chrome.runtime.sendMessage({type: 'omnia-lookup', word: word}, (response) => {
-        if (chrome.runtime.lastError) {
-          showPanel(
-            LookupView.renderMessage('Lookup unavailable', chrome.runtime.lastError.message),
-            word
-          );
+        // Read BEFORE the guard below: an unread lastError is what Chrome logs as "Unchecked
+        // runtime.lastError" on the page's console, and bailing out is not a reason to leave
+        // one behind.
+        const failure = chrome.runtime.lastError;
+        // The panel this answer belongs to may be gone -- Escape, or a click outside it, while
+        // the lookup was in flight. showPanel would then BUILD one at wherever the pointer now
+        // is, resurrecting something the user dismissed; and the panel carries write actions,
+        // so a stray one is not merely untidy.
+        if (!panelIsOpen()) {
+          return;
+        }
+        if (failure) {
+          showPanel(LookupView.renderMessage('Lookup unavailable', failure.message), word);
           return;
         }
         if (!response || !response.ok) {
@@ -752,9 +776,6 @@
         panel.scrollTop = scrollTop;
       }
     }
-    root.querySelectorAll('[data-omnia-close]').forEach((el) => {
-      el.addEventListener('click', removePanel);
-    });
     root.querySelectorAll('[data-omnia-audio]').forEach((el) => {
       el.addEventListener('click', () => playMedia(el, el.dataset.omniaAudio));
     });
@@ -785,27 +806,8 @@
    * @param {!Object} capture The capture behind the lookup ("Add to Anki" needs it).
    */
   function showResult(result, word, capture) {
-    panelState = {
-      word: word,
-      capture: capture,
-      result: result,
-      index: 0,
-      notes: {},
-      busy: null,
-      error: '',
-    };
-    showPanel(LookupView.renderPanel(currentModel()), word);
-  }
-
-  /** @return {!Object} The view model for whatever the panel is currently showing. */
-  function currentModel() {
-    return LookupView.buildPanelModel(panelState.result, panelState.index, {
-      word: panelState.word,
-      notes: panelState.notes,
-      busy: panelState.busy,
-      error: panelState.error,
-      canAdd: !!panelState.capture,
-    });
+    panelState = new LookupView.PanelState(word, result, capture);
+    showPanel(LookupView.renderPanel(panelState.model()), word);
   }
 
   /**
@@ -817,27 +819,22 @@
     if (!host || !host.shadowRoot || !panelState) {
       return;
     }
-    setPanelContent(host.shadowRoot, LookupView.renderPanel(currentModel()), keepScroll);
+    setPanelContent(host.shadowRoot, LookupView.renderPanel(panelState.model()), keepScroll);
   }
 
   /**
    * Show another matched note. No request: the whole answer is already in hand.
+   *
+   * Nothing but the index moves. What the note being left is generating, and what Omnia said
+   * about it, stay filed under that note (see LookupView.RegenerationState) so looking away
+   * cannot cancel a run or spill its messages onto the note now on screen.
+   *
    * @param {number} index Which of the matched notes to show.
    */
   function switchToNote(index) {
-    if (!panelState) {
+    if (!panelState || !panelState.showNote(index)) {
       return;
     }
-    const cards = (panelState.result && panelState.result.cards) || [];
-    if (!(index >= 0 && index < cards.length) || index === panelState.index) {
-      return;
-    }
-    panelState.index = index;
-    // Whatever Omnia last said was about the note we are leaving; carrying it over would
-    // pin "needs Definition" onto a field of a different note.
-    panelState.notes = {};
-    panelState.error = '';
-    panelState.busy = null;
     rerenderPanel(false);  // a different note: the top is where you want to be
   }
 
@@ -853,13 +850,21 @@
     if (!panelState || !panelState.result) {
       return;
     }
-    const model = currentModel();
-    if (!model.found || panelState.busy) {
-      return;  // one run at a time: a second would race the first's answer into the panel
+    const model = panelState.model();
+    if (!model.found) {
+      return;
+    }
+    const noteId = model.noteId;
+    const fields = fieldName ? [fieldName] : null;
+    const regen = panelState.regeneration;
+    if (!regen.canStart(noteId, fields)) {
+      // Already running FOR THIS NOTE. A second request would spend the user's credits on a
+      // generation that is already paid for, and race its own answer into the panel.
+      return;
     }
     // Inert controls still click, and this is what they do: say why, instead of nothing.
     if (!model.canRegenerate) {
-      panelState.error = model.generateAll.title;
+      regen.setError(noteId, model.generateAll.title);
       rerenderPanel(true);
       return;
     }
@@ -869,46 +874,41 @@
         return;
       }
       if (!field.canGenerate) {
-        panelState.notes[fieldName] = field.title;
+        regen.setMessage(noteId, fieldName, field.title);
         rerenderPanel(true);
         return;
       }
-      delete panelState.notes[fieldName];
-    } else {
-      panelState.notes = {};
     }
-    panelState.error = '';
-    panelState.busy = fieldName ? [fieldName] : 'all';
+    regen.start(noteId, fields);
     rerenderPanel(true);
 
     const state = panelState;
-    const noteId = model.noteId;
     const finish = (error, results) => {
-      // The panel may have been closed, or moved to another note, while this was in flight.
+      // The panel may have been closed, or a NEW LOOKUP may have replaced it, while this was in
+      // flight; either way this state object is no longer the one on screen. A note switch is
+      // not one of those cases and must not be treated as one -- the answer belongs to the note
+      // it named, which is what the state is keyed by.
       if (panelState !== state) {
         return;
       }
-      state.busy = null;
       if (error) {
-        if (fieldName) {
-          state.notes[fieldName] = error;
-        } else {
-          state.error = error;
-        }
+        state.regeneration.fail(noteId, fields, error);
       } else {
-        const applied = LookupView.applyGenerateResults(state.result, noteId, results);
-        state.result = applied.result;
-        Object.assign(state.notes, applied.notes);
+        state.applyAnswer(noteId, fields, results);
       }
       rerenderPanel(true);
     };
 
     try {
       chrome.runtime.sendMessage(
-        {type: 'omnia-generate', noteId: noteId, fields: fieldName ? [fieldName] : null},
+        {type: 'omnia-generate', noteId: noteId, fields: fields},
         (response) => {
           if (chrome.runtime.lastError) {
-            finish(RELOAD_MSG, null);
+            // The answer was lost, not refused: Chrome may terminate the service worker
+            // mid-fetch, and Omnia carries on generating regardless. So the panel's copy of the
+            // note is stale rather than wrong -- say that, then go and find out what it holds.
+            finish(LOST_ANSWER_MSG, null);
+            refreshLookup(state);
             return;
           }
           if (!response || !response.ok) {
@@ -919,7 +919,35 @@
         }
       );
     } catch (_e) {
+      // sendMessage itself threw: this content script's extension context is dead, so there is
+      // nothing left to ask and reloading the page really is the remedy.
       finish(RELOAD_MSG, null);
+    }
+  }
+
+  /**
+   * Look the panel's word up again and redraw from the fresher answer.
+   *
+   * Called when a /generate answer is lost. Best-effort by design: it is a repair, so a failure
+   * leaves the panel exactly as the lost answer left it -- with the message saying so -- rather
+   * than stacking a second complaint on top of the first.
+   *
+   * @param {!Object} state The PanelState the lost request belonged to.
+   */
+  function refreshLookup(state) {
+    try {
+      chrome.runtime.sendMessage({type: 'omnia-lookup', word: state.word}, (response) => {
+        if (chrome.runtime.lastError || !response || !response.ok) {
+          return;
+        }
+        if (panelState !== state || !panelIsOpen()) {
+          return;
+        }
+        state.adoptResult(response.result);
+        rerenderPanel(true);
+      });
+    } catch (_e) {
+      // The context died with the worker; the panel already says the request lost its answer.
     }
   }
 

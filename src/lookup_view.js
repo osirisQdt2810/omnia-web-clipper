@@ -1,18 +1,19 @@
 /**
  * @fileoverview Omnia Web Clipper - the lookup panel's view model (pure).
  *
- * No DOM, no chrome.*, no network. This file turns a /lookup payload plus the panel's own
- * interaction state (which note is on screen, what is generating, what came back) into a
- * plain-data model, and that model into the panel's markup. It also folds a /generate answer
- * back into the payload. content.js owns the shadow root, the events and the messaging.
+ * No DOM, no chrome.*, no network. This file OWNS the panel's interaction state (which note is
+ * on screen, what is generating on each of them, what came back) and turns it, plus a /lookup
+ * payload, into a plain-data model and then into the panel's markup. It also folds a /generate
+ * answer back into the payload. content.js owns the shadow root, the events and the messaging.
  *
  * The markup is built as a STRING with no handlers attached; content.js binds those by data
  * attribute afterwards, so nothing here can smuggle in an inline `on*` a page's CSP would
  * refuse -- and every branch of it is checkable without a browser.
  *
  * The split exists so the parts that are easy to get wrong -- which note the switcher points
- * at, why a field cannot be regenerated, which fields an answer is allowed to touch, which
- * controls exist at all -- are testable with plain Node (tests/lookup_panel.test.js).
+ * at, why a field cannot be regenerated, which fields an answer is allowed to touch, which note
+ * an answer belongs to, which controls exist at all -- are testable with plain Node
+ * (tests/lookup_panel.test.js).
  *
  * Loaded as a content script BEFORE content.js (manifest.json + the re-injection list in
  * background.js), and evaluated as source by the tests. Attaches one global, like shared.js.
@@ -30,7 +31,7 @@
   // where it lives -- a reason with no remedy is just a dead end.
   const REGENERATE_OFF_MESSAGE =
     'Regenerating is switched off. Turn on “Regenerate from clippers” in Anki: ' +
-    'Tools → Omnia → Smart Notes → Configure → Integrations.';
+    'Tools → Omnia → Smart Notes → Configure → Options → General.';
   const READY_MESSAGE = 'Generate this field with Omnia.';
   const GENERATE_ALL_MESSAGE = 'Generate every field of this note with Omnia.';
 
@@ -176,6 +177,21 @@
   }
 
   /**
+   * Which of a payload's cards an index points at.
+   *
+   * Said in ONE place because two halves ask it: the model (what to draw) and the panel state
+   * (which note an answer is about). Two copies of the out-of-range rule would eventually
+   * disagree, and then a request would be sent for a note other than the one on screen.
+   *
+   * @param {!Array<!Object>} cards The matched notes.
+   * @param {number} index The requested position.
+   * @return {number} The position to use (out of range falls back to the first).
+   */
+  function cardPosition(cards, index) {
+    return index >= 0 && index < cards.length ? index : 0;
+  }
+
+  /**
    * The scheduling line under the word: interval, reps, lapses, deck leaf.
    * @param {!Object} card A card from the /lookup payload.
    * @return {string} The joined line ('' when the card carries no scheduling at all).
@@ -232,7 +248,7 @@
       };
     }
 
-    const position = index >= 0 && index < cards.length ? index : 0;
+    const position = cardPosition(cards, index);
     const card = cards[position];
     const known = {};
     const fields = (card.fields || []).filter(Boolean).map(function (field) {
@@ -270,7 +286,9 @@
       canAdd: canAdd,
       error: error,
       index: position,
-      noteId: card.note_id,
+      // Normalised to 0 rather than passed through: a payload without one would otherwise ship
+      // an "Open in Anki" carrying `undefined`, which reaches Anki as a search for `nid:NaN`.
+      noteId: card.note_id || 0,
       title: card.title || word,
       state: String(card.state || 'new'),
       meta: metaLine(card),
@@ -387,6 +405,346 @@
       notes: notes,
       generated: generated,
     };
+  }
+
+  // -- the panel's own state -----------------------------------------------------------------
+
+  /**
+   * The key a note is filed under. Object keys are strings, so a note id has to be one too --
+   * otherwise 11 and '11' would be two different notes.
+   * @param {(number|string)} noteId The note id.
+   * @return {string} Its key.
+   */
+  function noteKey(noteId) {
+    return String(noteId);
+  }
+
+  /**
+   * What is generating for each note, and what Omnia last said about each one.
+   *
+   * Keyed by NOTE ID, exactly like the desktop clipper's ``RegenerationState``
+   * (omnia_desktop_clipper/lookup/regeneration.py). A lookup can match several notes, the user
+   * can step between them with the switcher while one is generating, and an answer that arrives
+   * then belongs to the note it NAMED -- not to whatever happens to be on screen.
+   *
+   * One `busy` marker and one `notes` map for "the panel" got both halves of that wrong.
+   * Switching notes cleared the in-flight marker, so a second request could go out while the
+   * first was still running and the same generation was paid for twice; and the first note's
+   * per-field reasons ("needs Definition") were printed under the second note's fields.
+   */
+  class RegenerationState {
+    constructor() {
+      /** @private {!Object<string, {all: boolean, fields: !Object<string, boolean>}>} */
+      this._running = {};
+      /** @private {!Object<string, !Object<string, string>>} */
+      this._messages = {};
+      /** @private {!Object<string, string>} */
+      this._errors = {};
+    }
+
+    /**
+     * Whether a regenerate request may start for this note.
+     *
+     * Per NOTE, not per panel: two different notes may generate at the same time (separate
+     * requests against separate notes, and the panel can only be made to send them by switching
+     * between the two). What may not happen is a second run of the same field of the same note
+     * -- that pays for one generation twice. A whole-note run waits for everything that note
+     * already has out, which is what a spinning "Generate all" means.
+     *
+     * @param {(number|string)} noteId The note the request is about.
+     * @param {?Array<string>} fields The fields it asks for, or null for the whole note.
+     * @return {boolean} Whether it may be sent.
+     */
+    canStart(noteId, fields) {
+      const run = this._running[noteKey(noteId)];
+      if (!run) {
+        return true;
+      }
+      if (run.all) {
+        return false;
+      }
+      const names = fields || [];
+      if (!names.length) {
+        return !Object.keys(run.fields).length;
+      }
+      return names.every(function (name) {
+        return !run.fields[name];
+      });
+    }
+
+    /**
+     * Mark a request as running.
+     *
+     * Whatever Omnia said about those fields goes with it: the question is being asked again,
+     * and leaving "needs Definition" under a spinner claims an answer that no longer applies.
+     *
+     * @param {(number|string)} noteId The note the request is about.
+     * @param {?Array<string>} fields The fields it asks for, or null for the whole note.
+     */
+    start(noteId, fields) {
+      const id = noteKey(noteId);
+      const run = this._running[id] || (this._running[id] = {all: false, fields: {}});
+      const names = fields || [];
+      if (!names.length) {
+        run.all = true;
+        this._messages[id] = {};
+      } else {
+        const messages = this._messagesFor(noteId);
+        names.forEach(function (name) {
+          run.fields[name] = true;
+          delete messages[name];
+        });
+      }
+      delete this._errors[id];
+    }
+
+    /**
+     * Record an answer and stop the spinners it settles.
+     *
+     * @param {(number|string)} noteId The note the answer is about.
+     * @param {?Array<string>} fields The fields that were asked for (null = the whole note).
+     * @param {?Object<string, string>} notes The per-field messages the answer carried.
+     */
+    settle(noteId, fields, notes) {
+      const messages = this._messagesFor(noteId);
+      const carried = notes || {};
+      Object.keys(carried).forEach(function (name) {
+        messages[name] = carried[name];
+      });
+      this._stop(noteId, fields);
+    }
+
+    /**
+     * Record that a request never ran, where the user is looking for the reason.
+     *
+     * On the fields it asked for, or on the panel when it asked for the whole note -- the same
+     * split the panel makes when it draws them.
+     *
+     * @param {(number|string)} noteId The note the request was about.
+     * @param {?Array<string>} fields The fields it asked for (null = the whole note).
+     * @param {string} message What went wrong.
+     */
+    fail(noteId, fields, message) {
+      const names = fields || [];
+      if (names.length) {
+        const messages = this._messagesFor(noteId);
+        names.forEach(function (name) {
+          messages[name] = message;
+        });
+      } else {
+        this._errors[noteKey(noteId)] = message;
+      }
+      this._stop(noteId, fields);
+    }
+
+    /**
+     * Say something about one field of one note -- an inert button explaining itself.
+     * @param {(number|string)} noteId The note.
+     * @param {string} name The field.
+     * @param {string} message What to show under it.
+     */
+    setMessage(noteId, name, message) {
+      this._messagesFor(noteId)[name] = message;
+    }
+
+    /**
+     * Say something about a note as a whole -- an inert "Generate all" explaining itself.
+     * @param {(number|string)} noteId The note.
+     * @param {string} message What to show on the panel.
+     */
+    setError(noteId, message) {
+      this._errors[noteKey(noteId)] = message;
+    }
+
+    /**
+     * What {@link buildPanelModel}'s `busy` option should be for this note.
+     * @param {(number|string)} noteId The note.
+     * @return {(string|!Array<string>)} 'all' for a whole-note run, else the running fields.
+     */
+    busy(noteId) {
+      const run = this._running[noteKey(noteId)];
+      if (!run) {
+        return [];
+      }
+      return run.all ? 'all' : Object.keys(run.fields);
+    }
+
+    /**
+     * The per-field messages for this note.
+     * @param {(number|string)} noteId The note.
+     * @return {!Object<string, string>} A copy -- the model is a reader, not an owner.
+     */
+    messages(noteId) {
+      return Object.assign({}, this._messages[noteKey(noteId)]);
+    }
+
+    /**
+     * The panel-wide message for this note.
+     * @param {(number|string)} noteId The note.
+     * @return {string} The message, or '' when it has none.
+     */
+    error(noteId) {
+      return this._errors[noteKey(noteId)] || '';
+    }
+
+    /**
+     * The message map for a note, created on demand.
+     * @param {(number|string)} noteId The note.
+     * @return {!Object<string, string>} The live map.
+     * @private
+     */
+    _messagesFor(noteId) {
+      const id = noteKey(noteId);
+      if (!this._messages[id]) {
+        this._messages[id] = {};
+      }
+      return this._messages[id];
+    }
+
+    /**
+     * Drop the running marks a settled request held.
+     *
+     * A whole-note request asked for everything, so it settles everything that note has out --
+     * that is what stops the third field of a "Generate all" spinning when the answer named
+     * only two. A single-field request settles only itself, so one answer can never stop a
+     * spinner over a field a different request is still generating.
+     *
+     * @param {(number|string)} noteId The note.
+     * @param {?Array<string>} fields The fields the request asked for (null = the whole note).
+     * @private
+     */
+    _stop(noteId, fields) {
+      const id = noteKey(noteId);
+      const run = this._running[id];
+      if (!run) {
+        return;
+      }
+      const names = fields || [];
+      if (!names.length) {
+        delete this._running[id];
+        return;
+      }
+      names.forEach(function (name) {
+        delete run.fields[name];
+      });
+      if (!run.all && !Object.keys(run.fields).length) {
+        delete this._running[id];
+      }
+    }
+  }
+
+  /**
+   * What the open lookup panel is showing: the answer in hand, which of its notes is on screen,
+   * and -- through {@link RegenerationState} -- what each of those notes is generating.
+   *
+   * content.js used to hold this as a plain object it mutated in place, and a note switch
+   * rewrote that object rather than replacing it. An in-flight request could therefore not tell
+   * "the panel moved on" from "nothing changed", because the object it captured was the same
+   * one either way. The rule here is that switching notes changes ONE number and nothing else,
+   * and that everything an answer touches is filed under the note the answer names.
+   */
+  class PanelState {
+    /**
+     * @param {string} word The word that was looked up.
+     * @param {?Object} result The /lookup payload.
+     * @param {?Object=} capture The capture behind the lookup ("Add to Anki" needs it).
+     */
+    constructor(word, result, capture) {
+      this.word = String(word == null ? '' : word);
+      this.result = result;
+      this.capture = capture || null;
+      this.regeneration = new RegenerationState();
+      /** @private {number} */
+      this._index = 0;
+    }
+
+    /**
+     * The matched notes the answer holds.
+     * @return {!Array<!Object>} The cards (never null; nothing falsy in it).
+     */
+    cards() {
+      return (this.result && Array.isArray(this.result.cards) ? this.result.cards : []).filter(
+        Boolean
+      );
+    }
+
+    /** @return {number} Which match is on screen, clamped exactly as the model clamps it. */
+    get index() {
+      return cardPosition(this.cards(), this._index);
+    }
+
+    /** @return {number} The id of the note on screen (0 when the answer holds no notes). */
+    noteId() {
+      const card = this.cards()[this.index];
+      return (card && card.note_id) || 0;
+    }
+
+    /**
+     * Show another matched note.
+     *
+     * Moves the index and NOTHING else: what note 1 is generating, and what Omnia said about
+     * it, belong to note 1 and have to survive being looked away from.
+     *
+     * @param {number} index Which of the matched notes to show.
+     * @return {boolean} Whether the panel moved (a redraw is only needed when it did).
+     */
+    showNote(index) {
+      if (!(index >= 0 && index < this.cards().length) || index === this.index) {
+        return false;
+      }
+      this._index = index;
+      return true;
+    }
+
+    /** @return {!Object} The view model for the note on screen. */
+    model() {
+      const noteId = this.noteId();
+      return buildPanelModel(this.result, this._index, {
+        word: this.word,
+        notes: this.regeneration.messages(noteId),
+        busy: this.regeneration.busy(noteId),
+        error: this.regeneration.error(noteId),
+        canAdd: !!this.capture,
+      });
+    }
+
+    /**
+     * Fold a /generate answer into the payload and record what it said.
+     *
+     * @param {(number|string)} noteId The note the answer is about -- not necessarily the one
+     *     on screen, because the user may have switched while it was in flight.
+     * @param {?Array<string>} fields The fields that were asked for (null = the whole note).
+     * @param {?Array<!Object>} results The answer's per-field results.
+     */
+    applyAnswer(noteId, fields, results) {
+      const applied = applyGenerateResults(this.result, noteId, results);
+      this.result = applied.result;
+      this.regeneration.settle(noteId, fields, applied.notes);
+    }
+
+    /**
+     * Adopt a fresher answer for the same word, keeping the reader where they are.
+     *
+     * Used when a /generate answer is LOST: the generation carries on inside Anki regardless, so
+     * asking again is the only way to show what the note actually holds. The note on screen is
+     * found again BY ID, because a fresh lookup may order its matches differently or no longer
+     * hold that note at all.
+     *
+     * @param {?Object} result The newer /lookup payload.
+     */
+    adoptResult(result) {
+      const shown = this.noteId();
+      this.result = result;
+      const cards = this.cards();
+      let position = 0;
+      for (let i = 0; i < cards.length; i += 1) {
+        if (Number(cards[i].note_id) === Number(shown)) {
+          position = i;
+          break;
+        }
+      }
+      this._index = position;
+    }
   }
 
   // -- rendering ---------------------------------------------------------------------------
@@ -588,6 +946,15 @@
       })
       .join('');
 
+    // Only for a note that HAS an id. "Open in Anki" reveals it by `nid:<id>`, so without one
+    // the button can only ask Anki for `nid:NaN` -- a control that is guaranteed to fail is
+    // worse than an absent one, because failing is all it teaches.
+    const open = model.noteId
+      ? '<div class="actions"><button class="action" data-omnia-open="' +
+        escapeHtml(model.noteId) +
+        '">Open in Anki</button></div>'
+      : '';
+
     return (
       '<div class="hdr">\n        <div class="word">' +
       escapeHtml(model.title) +
@@ -606,9 +973,7 @@
       '</div>' +
       extras +
       error +
-      '<div class="actions"><button class="action" data-omnia-open="' +
-      escapeHtml(model.noteId) +
-      '">Open in Anki</button></div>'
+      open
     );
   }
 
@@ -634,5 +999,7 @@
     buildPanelModel: buildPanelModel,
     statusMessage: statusMessage,
     applyGenerateResults: applyGenerateResults,
+    RegenerationState: RegenerationState,
+    PanelState: PanelState,
   };
 })(typeof self !== 'undefined' ? self : this);
