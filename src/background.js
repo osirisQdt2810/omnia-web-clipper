@@ -16,7 +16,8 @@
 
 importScripts('shared.js');
 
-const {loadSettings, ankiConnect} = self.OmniaClipper;
+const {loadSettings, ankiConnect, buildLookupUrl, requestGenerate, LOOKUP_UNREACHABLE} =
+  self.OmniaClipper;
 
 const CONTEXT_MENU_ID = 'omnia-clipper-send-selection';
 
@@ -218,7 +219,9 @@ async function reinjectContentScript() {
       chrome.scripting
         // executeScript's `files` are resolved from the EXTENSION ROOT (unlike importScripts,
         // which is service-worker-relative), so the src/ prefix is required after the refactor.
-        .executeScript({target: {tabId: tab.id}, files: ['src/content.js']})
+        // Same list, same ORDER as the manifest's content_scripts: content.js reads the panel's
+        // view model off the global lookup_view.js defines, so it has to be injected first.
+        .executeScript({target: {tabId: tab.id}, files: ['src/lookup_view.js', 'src/content.js']})
         .catch(() => {});
     }
   } catch (_e) {
@@ -283,8 +286,7 @@ if (chrome.contextMenus) {
  * @return {!Promise<!Object>} The lookup payload ({word, found, cards, ...}).
  */
 async function lookupWord(word, baseUrl) {
-  const url = `${baseUrl.replace(/\/$/, '')}/lookup?word=${encodeURIComponent(word)}`;
-  const response = await fetch(url, {method: 'GET'});
+  const response = await fetch(buildLookupUrl(baseUrl, word), {method: 'GET'});
   if (!response.ok) {
     throw new Error(`Lookup service answered ${response.status}.`);
   }
@@ -323,12 +325,47 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         const base = settings.lookupUrl || 'http://127.0.0.1:8766';
         sendResponse({ok: true, result: await lookupWord(message.word, base)});
       } catch (err) {
-        sendResponse({
-          ok: false,
-          error:
-            "Can't reach Anki's lookup service. Make sure Anki is running with Omnia's " +
-            '“Word Lookup” feature switched on.',
-        });
+        sendResponse({ok: false, error: LOOKUP_UNREACHABLE});
+      }
+    })();
+    return true;  // async sendResponse
+  }
+  if (message && message.type === 'omnia-generate') {
+    // The panel's regenerate buttons. This branch exists so the request is made HERE and not in
+    // the page: a page-context fetch to 127.0.0.1 carries an Origin header, and the add-on
+    // refuses those by design — /generate mutates notes and spends the user's LLM credits, so
+    // anything a web page could have initiated is refused. The error is already a sentence the
+    // user can act on (shared.js::generateErrorMessage), so it is passed straight through.
+    (async () => {
+      try {
+        const settings = await loadSettings();
+        const base = settings.lookupUrl || 'http://127.0.0.1:8766';
+        const result = await requestGenerate(
+          base, settings.lookupToken || '', message.noteId, message.fields,
+        );
+        sendResponse({ok: true, result: result});
+      } catch (err) {
+        sendResponse({ok: false, error: err && err.message ? err.message : String(err)});
+      }
+    })();
+    return true;  // async sendResponse
+  }
+  if (message && message.type === 'omnia-gui-browse') {
+    // "Open in Anki": reveal the note in Anki's card browser. AnkiConnect's guiBrowse takes a
+    // search string, and a note id search ("nid:123") is the only one that cannot match the
+    // wrong note — a word search would land on whatever else contains that word.
+    (async () => {
+      try {
+        const settings = await loadSettings();
+        await ankiConnect(
+          settings.ankiConnectUrl,
+          'guiBrowse',
+          {query: 'nid:' + Number(message.noteId)},
+          settings.apiKey,
+        );
+        sendResponse({ok: true});
+      } catch (err) {
+        sendResponse({ok: false, error: err && err.message ? err.message : String(err)});
       }
     })();
     return true;  // async sendResponse

@@ -78,7 +78,15 @@
       font-size: 11px; font-weight: 600; text-transform: uppercase;
       letter-spacing: 0.4px; color: #6b727c; margin-bottom: 7px;
     }
+    .fhead { display: flex; align-items: center; gap: 6px; margin-bottom: 7px; }
+    .fhead .fname { flex: 1; margin-bottom: 0; }
     .fval { font-size: 13px; color: #16191d; }
+    /* A field with nothing in it is the one you most want to regenerate, so it is SHOWN --
+       just visibly hollow, so it can never be mistaken for content. */
+    .field.empty { border-left-style: dashed; border-left-color: rgba(107,114,124,0.45); }
+    .placeholder { color: #9aa1ac; font-style: italic; }
+    .fnote { margin-top: 6px; font-size: 11px; line-height: 1.45; color: #a35b00; }
+    .panel-note { margin: 6px 2px 0; }
     .media-row { display: flex; flex-wrap: wrap; gap: 6px; }
     .media {
       font: inherit; font-size: 12px; cursor: pointer;
@@ -88,12 +96,56 @@
     .media:hover { border-color: #2f81f7; color: #2f81f7; }
     .media[disabled] { opacity: 0.6; cursor: default; }
     .media-img { max-width: 100%; max-height: 220px; border-radius: 6px; display: block; }
+    /* The note switcher: a segmented control, not chips, so it cannot be mistaken for the
+       header's information line (the desktop panel makes the same call). */
+    .switcher { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0 8px; }
+    .seg {
+      font: inherit; font-size: 11px; cursor: pointer; max-width: 100%;
+      background: transparent; color: #6b727c;
+      border: 1px solid #dfe3e8; border-radius: 7px; padding: 3px 9px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .seg:hover { border-color: #2f81f7; color: #2f81f7; }
+    .seg.active {
+      background: #2f81f7; border-color: #2f81f7; color: #ffffff;
+      font-weight: 600; cursor: default;
+    }
+    .toolbar { display: flex; justify-content: flex-end; margin: 0 0 8px; }
+    .actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 10px; }
+    .action, .genall {
+      font: inherit; font-size: 12px; cursor: pointer;
+      background: transparent; color: inherit;
+      border: 1px solid #dfe3e8; border-radius: 7px; padding: 4px 10px;
+      display: inline-flex; align-items: center; gap: 6px;
+    }
+    .action:hover, .genall:hover { border-color: #2f81f7; color: #2f81f7; }
+    .action[disabled], .genall[disabled] { opacity: 0.6; cursor: default; }
+    .gen {
+      font: inherit; font-size: 12px; line-height: 1; cursor: pointer;
+      width: 22px; height: 22px; padding: 0; flex: none;
+      display: inline-flex; align-items: center; justify-content: center;
+      background: transparent; color: #6b727c;
+      border: 1px solid #dfe3e8; border-radius: 6px;
+    }
+    .gen:hover { border-color: #2f81f7; color: #2f81f7; }
+    /* Inert, not absent. A control that cannot act still has to say WHY, so it keeps its
+       tooltip (and its click, which prints the reason) and only LOOKS unavailable. */
+    .gen.inert, .genall.inert { filter: blur(0.7px); opacity: 0.45; }
+    .gen.inert:hover, .genall.inert:hover { border-color: #dfe3e8; color: inherit; }
+    .spin {
+      display: inline-block; width: 11px; height: 11px; box-sizing: border-box;
+      border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+      animation: omnia-spin 0.7s linear infinite;
+    }
+    @keyframes omnia-spin { to { transform: rotate(360deg); } }
     @media (prefers-color-scheme: dark) {
       .omnia-panel { background: #1e2127; color: #e8eaed; border-color: #363b44; }
-      .muted, .fname { color: #9aa1ac; }
+      .muted, .fname, .seg, .gen { color: #9aa1ac; }
       .field { background: rgba(38,42,49,0.75); border-color: #363b44; }
-      .media { border-color: #363b44; }
+      .media, .seg, .gen, .action, .genall { border-color: #363b44; }
+      .seg.active { color: #ffffff; border-color: #2f81f7; }
       .fval { color: #e8eaed; }
+      .fnote { color: #e0a458; }
     }
   `;
 
@@ -107,10 +159,21 @@
   const MAX_CONTEXT_CHARS = 600;
   const MAX_SENTENCE_CHARS = 400;
 
+  // The panel's view model lives in lookup_view.js, injected just before this file (see the
+  // manifest and background.js's re-injection list). Everything below is glue: DOM, events and
+  // messaging. Every decision about WHAT to draw is made over there, where it is testable.
+  const LookupView = self.OmniaLookupView;
+
   // The most recent capture payload, frozen at the moment the selection was made.
   // We snapshot here (not on click) because clicking the tooltip can clear the
   // browser selection before we read it.
   let pendingCapture = null;
+
+  // What the open panel is showing: a LookupView.PanelState, or null when no panel is open. It
+  // holds the answer in hand (so a note switch re-renders without asking Anki again) and, keyed
+  // by note id, what each matched note is generating and what Omnia said about it. All of that
+  // lives in lookup_view.js, where it is testable; this file only drives it.
+  let panelState = null;
 
   // Cached enable flags so the (frequent) selection handler stays synchronous.
   // Seeded from storage on load and kept fresh via chrome.storage.onChanged.
@@ -137,13 +200,18 @@
     }
   }
 
-  /** Detach on a dead context: remove the "+" and stop the selection handlers firing. */
+  /** Detach on a dead context: remove our UI and stop the selection handlers firing. */
   function handleContextGone() {
     if (contextGone) {
       return;
     }
     contextGone = true;
     removeTooltip();
+    // The panel goes too. It is not merely stale UI: ensurePanelHost ADOPTS an existing host by
+    // id, so a panel left behind by this dead instance would be inherited whole -- handlers,
+    // shadow root and all -- by the instance a re-injection starts, which then draws a live
+    // answer into a node wired to a context that can no longer talk to Anki.
+    removePanel();
     document.removeEventListener('mouseup', onSelectionEvent, true);
     document.removeEventListener('dblclick', onSelectionEvent, true);
     document.removeEventListener('scroll', removeTooltip, true);
@@ -163,6 +231,13 @@
   }
 
   const RELOAD_MSG = 'Omnia was updated — reload this page (F5) to keep clipping.';
+  // A regeneration whose answer never came back. Chrome terminates an idle MV3 service worker
+  // on its own schedule, including mid-fetch, and Omnia goes on generating either way -- so
+  // this is NOT "the extension was updated, reload the page": the page is fine, and the work
+  // may well have succeeded. Saying the wrong one of those sends the user to fix nothing.
+  const LOST_ANSWER_MSG =
+    'Omnia never answered this request — it may still be generating. ' +
+    'Looking the word up again to show what the note holds now.';
 
   // -------------------------------------------------------------------------
   // Enable flags (master toggle + double-click toggle)
@@ -397,12 +472,18 @@
     return !!panel && (panel === node || panel.contains(node));
   }
 
-  /** Remove the lookup panel, if one is open. */
+  /** Remove the lookup panel, if one is open, and forget what it was showing. */
   function removePanel() {
     const existing = document.getElementById(PANEL_ID);
     if (existing) {
       existing.remove();
     }
+    panelState = null;
+  }
+
+  /** @return {boolean} Whether a lookup panel is on screen right now. */
+  function panelIsOpen() {
+    return !!document.getElementById(PANEL_ID);
   }
 
   /**
@@ -447,7 +528,7 @@
     let lookupButton = null;
     const add = makeCircleButton('+', '#2d6cdf', 'Add to Anki (Omnia)');
     add.setAttribute('aria-label', 'Add to Anki with Omnia');
-    arm(add, sendCapture);
+    arm(add, () => sendCapture(pendingCapture));
     pill.appendChild(add);
 
     if (lookupEnabled) {
@@ -455,7 +536,7 @@
       look.setAttribute('aria-label', 'Look up in Anki with Omnia');
       look.innerHTML = LOOKUP_SVG;
       look.style.position = 'relative';
-      arm(look, () => sendLookup(capture.selection || ''));
+      arm(look, () => sendLookup(capture));
       pill.appendChild(look);
       lookupButton = look;
     }
@@ -501,14 +582,6 @@
     });
     return el;
   }
-
-  // Card-state pill colours, matching the desktop clipper's panel.
-  const STATE_COLORS = {
-    new: '#3b82f6',
-    learning: '#f59e0b',
-    relearning: '#ef4444',
-    review: '#22a06b',
-  };
 
   /**
    * Ask in the background how many cards match, and mark the magnifier accordingly.
@@ -577,31 +650,53 @@
   }
 
   /**
-   * Ask the background worker to look ``word`` up and render the answer in a panel.
-   * @param {string} word The captured word.
+   * Ask the background worker to look the capture's word up and render the answer in a panel.
+   *
+   * The whole capture is kept, not just the word: the panel's "Add to Anki" (the not-found
+   * state) needs it, and by the time that button is clicked ``pendingCapture`` is long gone --
+   * the mousedown that opened the panel is an outside click as far as the pill is concerned,
+   * so it tears the pill down and clears the capture with it.
+   *
+   * @param {!Object} capture The capture payload behind the pill.
    */
-  function sendLookup(word) {
-    if (!word.trim()) {
+  function sendLookup(capture) {
+    const word = ((capture && capture.selection) || '').trim();
+    if (!word) {
       return;
     }
-    showPanel(renderLoading(word), word);
+    panelState = null;
+    showPanel(LookupView.renderLoading(word), word);
     try {
       chrome.runtime.sendMessage({type: 'omnia-lookup', word: word}, (response) => {
-        if (chrome.runtime.lastError) {
-          showPanel(renderMessage('Lookup unavailable', chrome.runtime.lastError.message), word);
+        // Read BEFORE the guard below: an unread lastError is what Chrome logs as "Unchecked
+        // runtime.lastError" on the page's console, and bailing out is not a reason to leave
+        // one behind.
+        const failure = chrome.runtime.lastError;
+        // The panel this answer belongs to may be gone -- Escape, or a click outside it, while
+        // the lookup was in flight. showPanel would then BUILD one at wherever the pointer now
+        // is, resurrecting something the user dismissed; and the panel carries write actions,
+        // so a stray one is not merely untidy.
+        if (!panelIsOpen()) {
+          return;
+        }
+        if (failure) {
+          showPanel(LookupView.renderMessage('Lookup unavailable', failure.message), word);
           return;
         }
         if (!response || !response.ok) {
           showPanel(
-            renderMessage('Lookup unavailable', (response && response.error) || 'Unknown error.'),
+            LookupView.renderMessage(
+              'Lookup unavailable',
+              (response && response.error) || 'Unknown error.'
+            ),
             word
           );
           return;
         }
-        showPanel(renderResult(response.result, word), word);
+        showResult(response.result, word, capture);
       });
     } catch (err) {
-      showPanel(renderMessage('Lookup unavailable', String(err)), word);
+      showPanel(LookupView.renderMessage('Lookup unavailable', String(err)), word);
     }
   }
 
@@ -615,7 +710,24 @@
    * @param {string} word The word being shown (for the aria label).
    */
   function showPanel(inner, word) {
-    removePanel();
+    setPanelContent(ensurePanelHost(word), inner, false);
+  }
+
+  /**
+   * The open panel's host element, created and anchored if there is not one yet.
+   *
+   * Reused rather than rebuilt so that loading -> result, and every note switch or field
+   * regeneration after it, redraw IN PLACE: a rebuilt host would re-anchor to wherever the
+   * pointer now is and throw away the scroll position mid-read.
+   *
+   * @param {string} word The word being shown (for the aria label).
+   * @return {!ShadowRoot} The host's shadow root.
+   */
+  function ensurePanelHost(word) {
+    const open = document.getElementById(PANEL_ID);
+    if (open && open.shadowRoot) {
+      return open.shadowRoot;
+    }
     const host = document.createElement('div');
     host.id = PANEL_ID;
     host.setAttribute('aria-label', `Omnia lookup: ${word}`);
@@ -638,88 +750,244 @@
       zIndex: '2147483647',
     });
     const root = host.attachShadow({mode: 'open'});
+    document.body.appendChild(host);
+    return root;
+  }
+
+  /**
+   * Draw ``inner`` into the panel and wire every control it declares.
+   *
+   * The markup is a string and the handlers are attached afterwards by data attribute, so no
+   * part of the panel is ever built with an inline ``on*`` the page's CSP could refuse.
+   *
+   * @param {!ShadowRoot} root The panel's shadow root.
+   * @param {string} inner The panel's inner HTML.
+   * @param {boolean} keepScroll Whether to restore the scroll position. True when the SAME note
+   *     is being redrawn (a spinner appearing must not throw you back to the top of a long
+   *     note); false when the content changes underneath, where the top is where you want to be.
+   */
+  function setPanelContent(root, inner, keepScroll) {
+    const previous = root.querySelector('.omnia-panel');
+    const scrollTop = keepScroll && previous ? previous.scrollTop : 0;
     root.innerHTML = `<style>${PANEL_CSS}</style><div class="omnia-panel">${inner}</div>`;
-    root.querySelectorAll('[data-omnia-close]').forEach((el) => {
-      el.addEventListener('click', removePanel);
-    });
+    if (scrollTop) {
+      const panel = root.querySelector('.omnia-panel');
+      if (panel) {
+        panel.scrollTop = scrollTop;
+      }
+    }
     root.querySelectorAll('[data-omnia-audio]').forEach((el) => {
       el.addEventListener('click', () => playMedia(el, el.dataset.omniaAudio));
     });
     root.querySelectorAll('[data-omnia-image]').forEach((el) => {
       el.addEventListener('click', () => showMedia(el, el.dataset.omniaImage));
     });
-    document.body.appendChild(host);
-  }
-
-  /** @return {string} The loading state's HTML. */
-  function renderLoading(word) {
-    return `<div class="hdr"><div class="word">${escapeHtml(word)}</div></div>
-      <div class="muted">Searching your collection…</div>`;
-  }
-
-  /** @return {string} A titled message (error / unavailable). */
-  function renderMessage(title, detail) {
-    return `<div class="hdr"><div class="word">${escapeHtml(title)}</div></div>
-      <div class="muted">${escapeHtml(detail)}</div>`;
+    root.querySelectorAll('[data-omnia-switch]').forEach((el) => {
+      el.addEventListener('click', () => switchToNote(Number(el.dataset.omniaSwitch)));
+    });
+    root.querySelectorAll('[data-omnia-open]').forEach((el) => {
+      el.addEventListener('click', () => openInAnki(Number(el.dataset.omniaOpen), el));
+    });
+    root.querySelectorAll('[data-omnia-add]').forEach((el) => {
+      el.addEventListener('click', addFromPanel);
+    });
+    root.querySelectorAll('[data-omnia-generate]').forEach((el) => {
+      el.addEventListener('click', () => requestGeneration(el.dataset.omniaGenerate));
+    });
+    root.querySelectorAll('[data-omnia-generate-all]').forEach((el) => {
+      el.addEventListener('click', () => requestGeneration(null));
+    });
   }
 
   /**
-   * Render the lookup payload: the top card, or a clear "not in your collection" state.
+   * Show a lookup answer and remember it, so the panel can be re-rendered without asking again.
    * @param {!Object} result The payload from the add-on.
    * @param {string} word The looked-up word.
-   * @return {string}
+   * @param {!Object} capture The capture behind the lookup ("Add to Anki" needs it).
    */
-  function renderResult(result, word) {
-    const cards = (result && result.cards) || [];
-    if (!cards.length) {
-      return `<div class="hdr"><div class="word">${escapeHtml(word)}</div></div>
-        <div class="muted">No card for this word in your collection yet.</div>`;
+  function showResult(result, word, capture) {
+    panelState = new LookupView.PanelState(word, result, capture);
+    showPanel(LookupView.renderPanel(panelState.model()), word);
+  }
+
+  /**
+   * Redraw the open panel from the state in hand. A closed panel is left closed.
+   * @param {boolean} keepScroll Whether this is the same note being redrawn.
+   */
+  function rerenderPanel(keepScroll) {
+    const host = document.getElementById(PANEL_ID);
+    if (!host || !host.shadowRoot || !panelState) {
+      return;
     }
-    const card = cards[0];
-    const state = String(card.state || 'new');
-    const bits = [];
-    if (card.interval_days) bits.push(`${card.interval_days}d interval`);
-    if (card.reps) bits.push(`${card.reps} reviews`);
-    if (card.lapses) bits.push(`${card.lapses} lapses`);
-    if (card.deck) bits.push(String(card.deck).split('::').pop());
-    // Media-only fields (Image, Word (audio)) carry no text. Dropping them left the web panel
-    // showing strictly less than the desktop one for the SAME note, which is confusing rather
-    // than tidy — they become buttons instead.
-    const fields = (card.fields || [])
-      .filter((f) => f && (f.text || (f.audio || []).length || (f.images || []).length))
-      .map((f) => {
-        const head = `<div class="fname">${escapeHtml(f.name)}</div>`;
-        if (f.text) {
-          const body = escapeHtml(f.text).replace(/\n/g, '<br>');
-          return `<div class="field">${head}<div class="fval">${body}</div></div>`;
+    setPanelContent(host.shadowRoot, LookupView.renderPanel(panelState.model()), keepScroll);
+  }
+
+  /**
+   * Show another matched note. No request: the whole answer is already in hand.
+   *
+   * Nothing but the index moves. What the note being left is generating, and what Omnia said
+   * about it, stay filed under that note (see LookupView.RegenerationState) so looking away
+   * cannot cancel a run or spill its messages onto the note now on screen.
+   *
+   * @param {number} index Which of the matched notes to show.
+   */
+  function switchToNote(index) {
+    if (!panelState || !panelState.showNote(index)) {
+      return;
+    }
+    rerenderPanel(false);  // a different note: the top is where you want to be
+  }
+
+  /**
+   * Regenerate one field, or the whole note.
+   *
+   * The request goes through the service worker (see background.js): a page-context fetch to
+   * 127.0.0.1 carries an Origin header, which the add-on refuses by design.
+   *
+   * @param {?string} fieldName The field to regenerate, or null for every field.
+   */
+  function requestGeneration(fieldName) {
+    if (!panelState || !panelState.result) {
+      return;
+    }
+    const model = panelState.model();
+    if (!model.found) {
+      return;
+    }
+    const noteId = model.noteId;
+    const fields = fieldName ? [fieldName] : null;
+    const regen = panelState.regeneration;
+    if (!regen.canStart(noteId, fields)) {
+      // Already running FOR THIS NOTE. A second request would spend the user's credits on a
+      // generation that is already paid for, and race its own answer into the panel.
+      return;
+    }
+    // Inert controls still click, and this is what they do: say why, instead of nothing.
+    if (!model.canRegenerate) {
+      regen.setError(noteId, model.generateAll.title);
+      rerenderPanel(true);
+      return;
+    }
+    if (fieldName) {
+      const field = model.fields.filter((f) => f.name === fieldName)[0];
+      if (!field) {
+        return;
+      }
+      if (!field.canGenerate) {
+        regen.setMessage(noteId, fieldName, field.title);
+        rerenderPanel(true);
+        return;
+      }
+    }
+    regen.start(noteId, fields);
+    rerenderPanel(true);
+
+    const state = panelState;
+    const finish = (error, results) => {
+      // The panel may have been closed, or a NEW LOOKUP may have replaced it, while this was in
+      // flight; either way this state object is no longer the one on screen. A note switch is
+      // not one of those cases and must not be treated as one -- the answer belongs to the note
+      // it named, which is what the state is keyed by.
+      if (panelState !== state) {
+        return;
+      }
+      if (error) {
+        state.regeneration.fail(noteId, fields, error);
+      } else {
+        state.applyAnswer(noteId, fields, results);
+      }
+      rerenderPanel(true);
+    };
+
+    try {
+      chrome.runtime.sendMessage(
+        {type: 'omnia-generate', noteId: noteId, fields: fields},
+        (response) => {
+          if (chrome.runtime.lastError) {
+            // The answer was lost, not refused: Chrome may terminate the service worker
+            // mid-fetch, and Omnia carries on generating regardless. So the panel's copy of the
+            // note is stale rather than wrong -- say that, then go and find out what it holds.
+            finish(LOST_ANSWER_MSG, null);
+            refreshLookup(state);
+            return;
+          }
+          if (!response || !response.ok) {
+            finish((response && response.error) || 'Omnia did not answer.', null);
+            return;
+          }
+          finish('', (response.result || {}).results);
         }
-        const buttons = []
-          .concat(
-            (f.audio || []).map(
-              (name) =>
-                `<button class="media" data-omnia-audio="${escapeHtml(name)}">▶ Play</button>`
-            )
-          )
-          .concat(
-            (f.images || []).map(
-              (name) =>
-                `<button class="media" data-omnia-image="${escapeHtml(name)}">🖼 Show image</button>`
-            )
-          )
-          .join('');
-        return `<div class="field">${head}<div class="fval media-row">${buttons}</div></div>`;
-      })
-      .join('');
-    const more =
-      cards.length > 1 ? `<div class="muted">+${cards.length - 1} more note(s)</div>` : '';
-    return `<div class="hdr">
-        <div class="word">${escapeHtml(card.title || word)}</div>
-        <div class="pill" style="background:${STATE_COLORS[state] || STATE_COLORS.review}">
-          ${escapeHtml(state)}
-        </div>
-      </div>
-      <div class="muted">${escapeHtml(bits.join('  ·  '))}</div>
-      <div class="fields">${fields}</div>${more}`;
+      );
+    } catch (_e) {
+      // sendMessage itself threw: this content script's extension context is dead, so there is
+      // nothing left to ask and reloading the page really is the remedy.
+      finish(RELOAD_MSG, null);
+    }
+  }
+
+  /**
+   * Look the panel's word up again and redraw from the fresher answer.
+   *
+   * Called when a /generate answer is lost. Best-effort by design: it is a repair, so a failure
+   * leaves the panel exactly as the lost answer left it -- with the message saying so -- rather
+   * than stacking a second complaint on top of the first.
+   *
+   * @param {!Object} state The PanelState the lost request belonged to.
+   */
+  function refreshLookup(state) {
+    try {
+      chrome.runtime.sendMessage({type: 'omnia-lookup', word: state.word}, (response) => {
+        if (chrome.runtime.lastError || !response || !response.ok) {
+          return;
+        }
+        if (panelState !== state || !panelIsOpen()) {
+          return;
+        }
+        state.adoptResult(response.result);
+        rerenderPanel(true);
+      });
+    } catch (_e) {
+      // The context died with the worker; the panel already says the request lost its answer.
+    }
+  }
+
+  /**
+   * Reveal the shown note in Anki's card browser.
+   * @param {number} noteId The note to open.
+   * @param {!HTMLElement} button The button that was pressed (it reports the outcome).
+   */
+  function openInAnki(noteId, button) {
+    const original = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Opening…';
+    const failed = (reason) => {
+      button.disabled = false;
+      button.textContent = 'Anki did not open';
+      button.title = reason || '';
+    };
+    try {
+      chrome.runtime.sendMessage({type: 'omnia-gui-browse', noteId: noteId}, (response) => {
+        if (chrome.runtime.lastError) {
+          failed(chrome.runtime.lastError.message);
+          return;
+        }
+        if (!response || !response.ok) {
+          failed((response && response.error) || 'Anki did not answer.');
+          return;
+        }
+        button.disabled = false;
+        button.textContent = original;
+      });
+    } catch (_e) {
+      failed(RELOAD_MSG);
+    }
+  }
+
+  /** Add the looked-up word from the panel's not-found state, then close the panel. */
+  function addFromPanel() {
+    const capture = panelState && panelState.capture;
+    removePanel();
+    sendCapture(capture);
   }
 
   /**
@@ -788,19 +1056,18 @@
     button.replaceWith(img);
   }
 
-  /** Escape text for safe insertion into the panel's HTML. */
-  function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = String(text == null ? '' : text);
-    return div.innerHTML;
-  }
-
-  /** Send the pending capture to the background worker and report the result. */
-  function sendCapture() {
-    if (!pendingCapture) {
+  /**
+   * Send a capture to the background worker and report the result.
+   *
+   * The payload is passed in rather than read from ``pendingCapture``: the panel's "Add to
+   * Anki" runs long after the pill (and the pending capture with it) has been torn down.
+   *
+   * @param {?Object} capture The capture payload to send.
+   */
+  function sendCapture(capture) {
+    if (!capture) {
       return;
     }
-    const capture = pendingCapture;
     removeTooltip();
     // The extension may have been reloaded since this script was injected — check BEFORE the
     // "Sending…" toast so a dead context shows an actionable message, not a permanent "Sending…".

@@ -25,6 +25,7 @@
         "<all_urls>"
       ],
       "js": [
+        "src/lookup_view.js",
         "src/content.js"
       ],
       "run_at": "document_idle"

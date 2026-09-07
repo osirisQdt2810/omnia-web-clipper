@@ -91,6 +91,40 @@ from AnkiConnect:
 - **Tags** — extra tags added to every note (comma-separated).
 - **Auto-generate (Omnia)** — when on, tags the note `omnia-autogen` so the add-on's gateway
   generates the remaining fields. On by default.
+- **Lookup service URL** — where Omnia's own loopback service listens; default
+  `http://127.0.0.1:8766`. This is *not* AnkiConnect.
+- **Omnia access token** — needed only to **regenerate** fields from the lookup panel. Copy it
+  from Anki (**Tools → Omnia → Word Lookup → Configure…**, the *Clipper access token* box —
+  Omnia issues it the first time Word Lookup is enabled); Omnia can also fill it in for you by
+  opening this page with the token in the URL. Looking a word up needs no token; regenerating
+  does, because it rewrites the note and spends your LLM credits. It is kept in
+  `chrome.storage.local`, **not** synced: it authenticates against a loopback service on *this*
+  machine, and every machine's Omnia issues its own.
+
+---
+
+## Look up a word — and regenerate its fields
+
+The pill next to the "+" is a **magnifier**: it asks Omnia what your collection already holds for
+the word and shows it in a floating panel, without opening Anki. Everything the desktop clipper's
+panel does, this one does:
+
+- **A note switcher** — when more than one note matches, one small button per match; pressing one
+  re-renders from the answer already in hand (no second request). The right note is not always the
+  top hit.
+- **Open in Anki** — reveals the shown note in Anki's card browser (`nid:<id>`, so it can never
+  land on the wrong note).
+- **Add to Anki** — offered on the "no card for this word yet" state, so the panel is never a dead
+  end.
+- **Regenerate** — a small ⟳ at the head of **every** field, plus one **Generate all** for the
+  whole note. Fields with nothing in them are shown too (hollow, dashed) — a never-filled field is
+  the one you most want to regenerate. Clicking spins in place and the value updates *in the panel
+  you are looking at*.
+
+A ⟳ that cannot act is dimmed rather than hidden, and it says why: no Smart Notes rule fills this
+field, the rule is switched off, another field has to be generated first, and so on. When Omnia's
+**"Regenerate from clippers"** option is off, every control is inert and says so — that is the one
+switch that turns the whole feature on.
 
 ---
 
@@ -132,6 +166,19 @@ clipper uses `omnia-desktop-clipper` with its own toggle.)
   Smart Notes → Configure → Integrations**, and configure Smart Notes for that note type.
 - **"+" doesn't appear** → the extension can't inject into some pages (e.g. `chrome://` pages, the
   Web Store, PDFs opened in the built-in viewer). Reload the page after installing/updating.
+- **Regenerating says "Regenerate from clippers" is off** → turn that option on in **Tools → Omnia
+  → Smart Notes → Configure → Options → General**, then look the word up again.
+- **Regenerating says Smart Notes is not available** → the Smart Notes plugin is off in **Tools →
+  Omnia**, or Anki is busy with something else. Enable it and retry.
+- **Regenerating says Omnia rejected the token** → paste the token from **Tools → Omnia → Word
+  Lookup → Configure…** (the *Clipper access token* box) into Options.
+- **Regenerating says Omnia refused the request (403)** → the add-on accepts `/generate` from an
+  extension (any `chrome-extension://` origin, by scheme) but never from a web page, so a 403 here
+  means the request did not come from this extension's service worker. Reload the extension on
+  `chrome://extensions` and retry; if it persists, regenerate from Anki itself and open an issue.
+  (Looking a word up is unaffected — the add-on does not gate reads on the header.)
+- **Regenerating gives up after 5 minutes** → the request is budgeted like the desktop clipper's.
+  Omnia may well finish it anyway; look the word up again to see what the note holds.
 
 ---
 
@@ -141,12 +188,14 @@ clipper uses `omnia-desktop-clipper` with its own toggle.)
 omnia-web-clipper/
 ├── manifest.json         # MV3 manifest (must stay at the root; paths point into src/ + assets/)
 ├── src/
-│   ├── background.js     # service worker: context menu + the addNote flow to AnkiConnect
-│   ├── content.js        # in-page: double-click/select detection, floating "+", context read
-│   ├── shared.js         # AnkiConnect fetch helper + error messages
-│   ├── options.html/js   # options page (deck/note-type/field-map/tags/autogen/url/key)
+│   ├── background.js     # service worker: context menu, addNote, /lookup + /generate proxying
+│   ├── content.js        # in-page glue: selection detection, the "+" pill, the panel's events
+│   ├── lookup_view.js    # pure: the lookup panel's view model + markup (no DOM, no chrome.*)
+│   ├── shared.js         # AnkiConnect + Omnia lookup/generate clients, settings, error messages
+│   ├── options.html/js   # options page (deck/note-type/field-map/tags/autogen/url/key/token)
 │   └── popup.html/js     # toolbar popup (status + enable toggle)
 ├── assets/
 │   └── icons/            # extension icons
+├── tests/                # plain Node + `assert` scripts (no framework); CI runs each one
 └── package.sh            # build a distributable zip
 ```
