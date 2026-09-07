@@ -19,6 +19,10 @@
     // from AnkiConnect, and reached from the background worker (see background.js lookupWord).
     lookupUrl: 'http://127.0.0.1:8766',
     lookupEnabled: true, // Show the magnifier next to the "+".
+    // Shared secret for the add-on's WRITE endpoint (/generate). Reading is unauthenticated;
+    // regenerating spends the user's LLM credits, so it is not. Typed on the options page, or
+    // handed over by Omnia as ?omnia-token=… when it opens Settings.
+    lookupToken: '',
     apiKey: '', // AnkiConnect "apiKey" option; empty when AnkiConnect apiKey is null.
     enabled: true, // Master on/off. When false, no "+" and no context-menu action.
     mouseEnabled: true, // Double-click "+" tooltip on/off (the right-click menu is unaffected).
@@ -118,6 +122,157 @@
     return data ? data.result : undefined;
   }
 
+  // -- Omnia lookup service (the add-on's own loopback port, NOT AnkiConnect) ---------------
+  //
+  // Both calls happen in the SERVICE WORKER. The write one has to: the add-on refuses any
+  // /generate request that carries an `Origin` header, because a request a web page could have
+  // initiated must never be able to spend the user's LLM credits. See README.
+
+  // Which clipper is asking. The add-on keys its per-clipper integration settings on this, so
+  // every request carries it -- the web and desktop clippers can be configured separately.
+  const LOOKUP_CLIENT = 'web_clipper';
+  const GENERATE_PATH = '/generate';
+  const LOOKUP_PATH = '/lookup';
+  const TOKEN_HEADER = 'X-Omnia-Token';
+  // How Omnia hands the token to this extension: it opens the options page with the token in
+  // the query string (the same route the Reload handshake uses), so nobody has to copy it.
+  const TOKEN_PARAM = 'omnia-token';
+
+  const LOOKUP_UNREACHABLE =
+    "Can't reach Anki's lookup service. Make sure Anki is running with Omnia's " +
+    '“Word Lookup” feature switched on.';
+
+  /**
+   * Strip a trailing slash so a base URL concatenates cleanly.
+   * @param {string} baseUrl The configured service URL.
+   * @return {string} The normalised base.
+   */
+  function normaliseBase(baseUrl) {
+    return String(baseUrl || '').replace(/\/+$/, '');
+  }
+
+  /**
+   * The URL for one word lookup.
+   * @param {string} baseUrl Where the add-on's lookup service listens.
+   * @param {string} word The word to look up.
+   * @return {string} The full GET URL.
+   */
+  function buildLookupUrl(baseUrl, word) {
+    return (
+      normaliseBase(baseUrl) +
+      LOOKUP_PATH +
+      '?word=' +
+      encodeURIComponent(word) +
+      '&client=' +
+      encodeURIComponent(LOOKUP_CLIENT)
+    );
+  }
+
+  /**
+   * The URL of the regeneration endpoint.
+   * @param {string} baseUrl Where the add-on's lookup service listens.
+   * @return {string} The full POST URL.
+   */
+  function buildGenerateUrl(baseUrl) {
+    return normaliseBase(baseUrl) + GENERATE_PATH;
+  }
+
+  /**
+   * Read the token Omnia may have put in the options page's query string.
+   * @param {string} search The location.search to parse.
+   * @return {string} The token, or '' when there is none.
+   */
+  function readTokenFromSearch(search) {
+    try {
+      return (new URLSearchParams(search || '').get(TOKEN_PARAM) || '').trim();
+    } catch (_e) {
+      return ''; // no URLSearchParams / no location: nothing was handed over
+    }
+  }
+
+  /**
+   * Turn a /generate HTTP failure into a sentence naming the remedy.
+   *
+   * A status code on its own is not actionable, and these two in particular have a specific
+   * fix that lives somewhere the user would never think to look: 409 means one checkbox in
+   * Anki, 503 means the Smart Notes plugin is off.
+   *
+   * @param {number} status The HTTP status.
+   * @param {?Object=} payload The parsed error body ({error: "..."}), when there was one.
+   * @return {string} What went wrong and what to do about it.
+   */
+  function generateErrorMessage(status, payload) {
+    const detail = payload && payload.error ? String(payload.error).trim() : '';
+    const messages = {
+      400:
+        'Omnia could not read the request (400). This is a bug in the clipper — ' +
+        'please report it.',
+      401:
+        'Omnia rejected the access token (401). Copy the token from Anki ' +
+        '(Tools → Omnia → Smart Notes → Configure → Integrations) into this extension’s Options.',
+      403:
+        'Omnia refused the request (403) because the browser attached an Origin header to it. ' +
+        'The add-on has to allow this extension explicitly — until it does, regenerate from ' +
+        'the desktop clipper or from Anki itself.',
+      409:
+        'Regenerating is switched off. Turn on “Regenerate from clippers” in Anki ' +
+        '(Tools → Omnia → Smart Notes → Configure → Integrations) and try again.',
+      503:
+        'Smart Notes is not available right now. Enable the Smart Notes plugin in Anki ' +
+        '(Tools → Omnia) and make sure Anki is not busy, then try again.',
+    };
+    const base = messages[status] || 'Omnia answered ' + status + '.';
+    return detail && detail !== base ? base + ' (' + detail + ')' : base;
+  }
+
+  /**
+   * Ask Omnia to regenerate fields of a note. Returns the parsed answer or throws an
+   * already-actionable Error.
+   *
+   * @param {string} baseUrl Where the add-on's lookup service listens.
+   * @param {string} token The shared secret from settings (sent even when empty, so the
+   *     add-on's own 401 explains it rather than this half guessing).
+   * @param {number} noteId The note to regenerate.
+   * @param {?Array<string>=} fields Which fields, or null/undefined for every field.
+   * @return {!Promise<!Object>} `{note_id, results: [{field, status, message, ...}]}`.
+   */
+  async function requestGenerate(baseUrl, token, noteId, fields) {
+    const body = {
+      client: LOOKUP_CLIENT,
+      note_id: Number(noteId),
+      fields: Array.isArray(fields) && fields.length ? fields : null,
+    };
+    const headers = {'Content-Type': 'application/json'};
+    headers[TOKEN_HEADER] = String(token || '');
+
+    let response;
+    try {
+      response = await fetch(buildGenerateUrl(baseUrl), {
+        method: 'POST',
+        headers: headers,
+        body: JSON.stringify(body),
+      });
+    } catch (err) {
+      throw new Error(LOOKUP_UNREACHABLE);
+    }
+
+    if (!response.ok) {
+      let payload = null;
+      try {
+        payload = await response.json();
+      } catch (_e) {
+        payload = null; // an error body is a courtesy, not a guarantee
+      }
+      throw new Error(generateErrorMessage(response.status, payload));
+    }
+
+    try {
+      return await response.json();
+    } catch (err) {
+      throw new Error('Omnia returned a non-JSON answer to the regenerate request.');
+    }
+  }
+
   // -- Omnia reload handshake ------------------------------------------------------------
   // Both halves live in different files (options.js asks, background.js answers) and are
   // loaded into different contexts, so the key is defined ONCE here: a typo in either copy
@@ -131,9 +286,18 @@
   root.OmniaClipper = {
     REOPEN_OPTIONS_KEY: REOPEN_OPTIONS_KEY,
     REOPEN_OPTIONS_TTL_MS: REOPEN_OPTIONS_TTL_MS,
+    LOOKUP_CLIENT: LOOKUP_CLIENT,
+    TOKEN_HEADER: TOKEN_HEADER,
+    TOKEN_PARAM: TOKEN_PARAM,
+    LOOKUP_UNREACHABLE: LOOKUP_UNREACHABLE,
     DEFAULTS: DEFAULTS,
     loadSettings: loadSettings,
     saveSettings: saveSettings,
     ankiConnect: ankiConnect,
+    buildLookupUrl: buildLookupUrl,
+    buildGenerateUrl: buildGenerateUrl,
+    readTokenFromSearch: readTokenFromSearch,
+    generateErrorMessage: generateErrorMessage,
+    requestGenerate: requestGenerate,
   };
 })(typeof self !== 'undefined' ? self : this);
