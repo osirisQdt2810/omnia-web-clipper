@@ -32,6 +32,25 @@
   const REGENERATE_OFF_MESSAGE =
     'Regenerating is switched off. Turn on “Regenerate from clippers” in Anki: ' +
     'Tools → Omnia → Smart Notes → Configure → Options → General.';
+  // The OTHER way regeneration can be unavailable, and the reason the payload carries a
+  // `regenerate_reason` at all: with Smart Notes disabled that checkbox does not exist, so
+  // sending the user to look for it is a dead end dressed as a remedy.
+  const REGENERATE_UNAVAILABLE_MESSAGE =
+    'Regenerating needs Smart Notes. Switch it on in Anki: Tools → Omnia.';
+
+  /**
+   * Why regeneration is refused, as a sentence naming something the user can actually do.
+   * @param {?Object} result The /lookup payload.
+   * @return {string}
+   */
+  function regenerateRefusal(result) {
+    const reason = (result && result.regenerate_reason) || '';
+    // An older Omnia sends no reason. "Off" is the safer guess there: it names a real control,
+    // and a user who does not find it has still been told the feature is a switch.
+    return reason === 'unavailable'
+      ? REGENERATE_UNAVAILABLE_MESSAGE
+      : REGENERATE_OFF_MESSAGE;
+  }
   const READY_MESSAGE = 'Generate this field with Omnia.';
   const GENERATE_ALL_MESSAGE = 'Generate every field of this note with Omnia.';
 
@@ -150,11 +169,12 @@
    *
    * @param {?Object} field A field from the /lookup payload.
    * @param {boolean} canRegenerate The payload's top-level can_regenerate.
+   * @param {string} refusal The sentence to show when it is false (see regenerateRefusal).
    * @return {{canGenerate: boolean, title: string}} The button's behaviour and tooltip.
    */
-  function fieldAction(field, canRegenerate) {
+  function fieldAction(field, canRegenerate, refusal) {
     if (!canRegenerate) {
-      return {canGenerate: false, title: REGENERATE_OFF_MESSAGE};
+      return {canGenerate: false, title: refusal || REGENERATE_OFF_MESSAGE};
     }
     const state = fieldState(field);
     if (state === 'ready') {
@@ -224,6 +244,7 @@
     const cards = (result && Array.isArray(result.cards) ? result.cards : []).filter(Boolean);
     const word = opts.word || (result && result.word) || '';
     const canRegenerate = !!(result && result.can_regenerate);
+    const refusal = regenerateRefusal(result);
     const notes = opts.notes || {};
     const busy = opts.busy;
     const error = opts.error || '';
@@ -252,7 +273,7 @@
     const card = cards[position];
     const known = {};
     const fields = (card.fields || []).filter(Boolean).map(function (field) {
-      const action = fieldAction(field, canRegenerate);
+      const action = fieldAction(field, canRegenerate, refusal);
       known[field.name] = true;
       return {
         name: field.name,
@@ -309,7 +330,7 @@
       extraNotes: extraNotes,
       generateAll: {
         enabled: canRegenerate,
-        title: canRegenerate ? GENERATE_ALL_MESSAGE : REGENERATE_OFF_MESSAGE,
+        title: canRegenerate ? GENERATE_ALL_MESSAGE : refusal,
         busy: busy === 'all' || busy === true,
       },
     };
@@ -982,6 +1003,8 @@
     REGENERATE_OFF_MESSAGE: REGENERATE_OFF_MESSAGE,
     READY_MESSAGE: READY_MESSAGE,
     GENERATE_ALL_MESSAGE: GENERATE_ALL_MESSAGE,
+    REGENERATE_UNAVAILABLE_MESSAGE: REGENERATE_UNAVAILABLE_MESSAGE,
+    regenerateRefusal: regenerateRefusal,
     FIELD_STATE_MESSAGES: FIELD_STATE_MESSAGES,
     STATUS_MESSAGES: STATUS_MESSAGES,
     STATE_COLORS: STATE_COLORS,
