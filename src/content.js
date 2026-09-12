@@ -206,6 +206,14 @@
       return;
     }
     contextGone = true;
+    if (audioContext) {
+      try {
+        audioContext.close();
+      } catch (_e) {
+        // A context that is already closed is not a reason to abandon the rest of the teardown.
+      }
+      audioContext = null;
+    }
     removeTooltip();
     // The panel goes too. It is not merely stale UI: ensurePanelHost ADOPTS an existing host by
     // id, so a panel left behind by this dead instance would be inherited whole -- handlers,
@@ -231,6 +239,10 @@
   }
 
   const RELOAD_MSG = 'Omnia was updated — reload this page (F5) to keep clipping.';
+
+  // One AudioContext for every clip this panel plays (see playThroughWebAudio), closed with the
+  // rest of the instance: a page may only hold a handful, and one per click runs out.
+  let audioContext = null;
   // A regeneration whose answer never came back. Chrome terminates an idle MV3 service worker
   // on its own schedule, including mid-fetch, and Omnia goes on generating either way -- so
   // this is NOT "the extension was updated, reload the page": the page is fine, and the work
@@ -990,17 +1002,58 @@
     sendCapture(capture);
   }
 
+  /** What a media file IS, by extension, so a Blob handed to the page is typed. */
+  const MEDIA_TYPES = {
+    mp3: 'audio/mpeg',
+    ogg: 'audio/ogg',
+    oga: 'audio/ogg',
+    opus: 'audio/ogg',
+    wav: 'audio/wav',
+    m4a: 'audio/mp4',
+    mp4: 'audio/mp4',
+    flac: 'audio/flac',
+    webm: 'audio/webm',
+    png: 'image/png',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    gif: 'image/gif',
+    webp: 'image/webp',
+    avif: 'image/avif',
+    svg: 'image/svg+xml',
+  };
+
+  /**
+   * The MIME type for a media file name ("" when the extension is unknown).
+   * @param {string} filename The media file name.
+   * @return {string}
+   */
+  function mediaTypeOf(filename) {
+    const ext = String(filename || '')
+      .split('.')
+      .pop()
+      .toLowerCase();
+    return MEDIA_TYPES[ext] || '';
+  }
+
   /**
    * Fetch a media file's bytes through the background worker.
    * @param {string} filename The media file name as stored in the collection.
-   * @return {!Promise<?Blob>} The bytes, or null when unavailable.
+   * @return {!Promise<{bytes: ?Uint8Array, error: string}>} The bytes, or why there are none.
    */
   function fetchMedia(filename) {
     return new Promise((resolve) => {
+      const failed = (error) => resolve({bytes: null, error: error});
       try {
         chrome.runtime.sendMessage({type: 'omnia-media', filename: filename}, (response) => {
-          if (chrome.runtime.lastError || !response || !response.ok) {
-            resolve(null);
+          if (chrome.runtime.lastError) {
+            failed(RELOAD_MSG);
+            return;
+          }
+          if (!response || !response.ok) {
+            // The worker's own sentence — "Media file not found.", an AnkiConnect error —
+            // rather than a silent null. A button that says only "unavailable" sends the user
+            // looking for a problem it already knows the name of.
+            failed((response && response.error) || 'Anki did not answer.');
             return;
           }
           try {
@@ -1009,15 +1062,80 @@
             for (let i = 0; i < binary.length; i += 1) {
               bytes[i] = binary.charCodeAt(i);
             }
-            resolve(new Blob([bytes]));
+            resolve({bytes: bytes, error: ''});
           } catch (_e) {
-            resolve(null);
+            failed('The file came back unreadable.');
           }
         });
       } catch (_e) {
-        resolve(null);
+        failed(RELOAD_MSG);
       }
     });
+  }
+
+  /**
+   * Play bytes through Web Audio.
+   *
+   * THE point of this path: nothing is loaded from a URL, so the page's Content-Security-Policy
+   * has nothing to refuse. An `<audio>` element pointed at a `blob:` URL is a resource load, and
+   * a site with `default-src 'self'` (most dictionaries, most news sites) blocks it — the clip
+   * then fails with NotSupportedError and the panel said "unavailable" for every sound on the
+   * page, which is exactly what was reported. `decodeAudioData` takes the bytes we already hold.
+   *
+   * One context for the panel's lifetime: browsers cap how many a page may open, and a fresh one
+   * per click runs out after a handful of plays.
+   *
+   * @param {!Uint8Array} bytes The clip.
+   * @return {!Promise<void>} Resolves once playback has STARTED.
+   */
+  async function playThroughWebAudio(bytes) {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) {
+      throw new Error('no Web Audio here');
+    }
+    if (!audioContext) {
+      audioContext = new Ctx();
+    }
+    if (audioContext.state === 'suspended') {
+      // The click that got here is the activation; resume is what spends it.
+      await audioContext.resume();
+    }
+    const buffer = await audioContext.decodeAudioData(bytes.buffer.slice(0));
+    const source = audioContext.createBufferSource();
+    source.buffer = buffer;
+    source.connect(audioContext.destination);
+    source.start();
+  }
+
+  /**
+   * Play bytes through an `<audio>` element — the fallback, for what Web Audio cannot decode.
+   * @param {!Uint8Array} bytes The clip.
+   * @param {string} type Its MIME type, so the element is not left sniffing.
+   * @return {!Promise<boolean>} Whether it started.
+   */
+  async function playThroughElement(bytes, type) {
+    try {
+      const url = URL.createObjectURL(new Blob([bytes], type ? {type: type} : undefined));
+      const audio = new window.Audio(url);
+      // Free the object URL once the clip finishes; a panel left open all day must not leak.
+      audio.addEventListener('ended', () => URL.revokeObjectURL(url));
+      await audio.play();
+      return true;
+    } catch (_e) {
+      return false;
+    }
+  }
+
+  /**
+   * Mark a media button as failed, saying why in its tooltip and in the console.
+   * @param {!Element} button The button.
+   * @param {string} reason One sentence.
+   */
+  function mediaFailed(button, reason) {
+    button.textContent = 'unavailable';
+    button.title = reason;
+    button.disabled = false;
+    console.warn('Omnia clipper: ' + reason);
   }
 
   /** Play a note's audio clip in place. */
@@ -1025,17 +1143,19 @@
     button.disabled = true;
     const original = button.textContent;
     button.textContent = '…';
-    const blob = await fetchMedia(filename);
-    if (!blob) {
-      button.textContent = 'unavailable';
+    const media = await fetchMedia(filename);
+    if (!media.bytes) {
+      mediaFailed(button, media.error);
       return;
     }
-    const audio = new Audio(URL.createObjectURL(blob));
-    // Free the object URL once the clip finishes; a panel left open all day must not leak.
-    audio.addEventListener('ended', () => URL.revokeObjectURL(audio.src));
-    audio.play().catch(() => {
-      button.textContent = 'unavailable';
-    });
+    try {
+      await playThroughWebAudio(media.bytes);
+    } catch (err) {
+      if (!(await playThroughElement(media.bytes, mediaTypeOf(filename)))) {
+        mediaFailed(button, 'This page would not play the clip (' + err + ').');
+        return;
+      }
+    }
     button.textContent = original;
     button.disabled = false;
   }
@@ -1044,16 +1164,26 @@
   async function showMedia(button, filename) {
     button.disabled = true;
     button.textContent = 'Loading…';
-    const blob = await fetchMedia(filename);
-    if (!blob) {
-      button.textContent = 'unavailable';
+    const media = await fetchMedia(filename);
+    if (!media.bytes) {
+      mediaFailed(button, media.error);
       return;
     }
     const img = document.createElement('img');
-    img.src = URL.createObjectURL(blob);
     img.className = 'media-img';
-    img.addEventListener('load', () => URL.revokeObjectURL(img.src));
-    button.replaceWith(img);
+    // Swapped in only once it has LOADED. Replacing the button first left a broken-image box
+    // with nothing to click and no reason given when the page's policy refused the blob.
+    img.addEventListener('load', () => {
+      URL.revokeObjectURL(img.src);
+      button.replaceWith(img);
+    });
+    img.addEventListener('error', () => {
+      URL.revokeObjectURL(img.src);
+      mediaFailed(button, "This page's security policy blocked the image.");
+    });
+    img.src = URL.createObjectURL(
+      new Blob([media.bytes], mediaTypeOf(filename) ? {type: mediaTypeOf(filename)} : undefined)
+    );
   }
 
   /**
