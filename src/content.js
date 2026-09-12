@@ -207,11 +207,10 @@
     }
     contextGone = true;
     if (audioContext) {
-      try {
-        audioContext.close();
-      } catch (_e) {
-        // A context that is already closed is not a reason to abandon the rest of the teardown.
-      }
+      // A context that is already closed REJECTS rather than throwing, so this needs the
+      // promise's own catch; a try/catch around it would not see it, and an unhandled rejection
+      // in a teardown is a console error the user cannot act on.
+      Promise.resolve(audioContext.close()).catch(() => {});
       audioContext = null;
     }
     removeTooltip();
@@ -240,8 +239,9 @@
 
   const RELOAD_MSG = 'Omnia was updated — reload this page (F5) to keep clipping.';
 
-  // One AudioContext for every clip this panel plays (see playThroughWebAudio), closed with the
-  // rest of the instance: a page may only hold a handful, and one per click runs out.
+  // One AudioContext for every clip this content script plays (see playThroughWebAudio). It
+  // outlives an individual panel and is closed with the INSTANCE, at teardown: a page may only
+  // hold a handful, and one per click runs out after a few plays.
   let audioContext = null;
   // A regeneration whose answer never came back. Chrome terminates an idle MV3 service worker
   // on its own schedule, including mid-fetch, and Omnia goes on generating either way -- so
@@ -1046,7 +1046,11 @@
       try {
         chrome.runtime.sendMessage({type: 'omnia-media', filename: filename}, (response) => {
           if (chrome.runtime.lastError) {
-            failed(RELOAD_MSG);
+            // NOT the reload sentence. A lastError in the CALLBACK means Chrome terminated the
+            // idle worker while the request was in flight; the page is fine and pressing the
+            // button again wakes it. Reloading would destroy the panel to fix nothing. The
+            // synchronous catch below is the case where the context really is gone.
+            failed('Omnia never answered — press it again.');
             return;
           }
           if (!response || !response.ok) {
@@ -1114,34 +1118,61 @@
    * @return {!Promise<boolean>} Whether it started.
    */
   async function playThroughElement(bytes, type) {
+    let url = '';
     try {
-      const url = URL.createObjectURL(new Blob([bytes], type ? {type: type} : undefined));
+      url = URL.createObjectURL(new Blob([bytes], type ? {type: type} : undefined));
       const audio = new window.Audio(url);
       // Free the object URL once the clip finishes; a panel left open all day must not leak.
       audio.addEventListener('ended', () => URL.revokeObjectURL(url));
       await audio.play();
       return true;
     } catch (_e) {
+      // Including the case this whole path exists for: a page whose CSP refuses the blob. The
+      // URL outlives the rejection, so one failed click would otherwise leak a clip.
+      if (url) {
+        URL.revokeObjectURL(url);
+      }
       return false;
     }
   }
 
   /**
    * Mark a media button as failed, saying why in its tooltip and in the console.
+   *
+   * The button stays LIVE: the usual cause is Anki being closed, and the fix is to open it and
+   * press again. That is also why the label it started with is stashed first — restoring
+   * whatever the button said at the top of the retry would restore "unavailable", so a control
+   * that now works would go on claiming to be broken for the life of the panel.
+   *
    * @param {!Element} button The button.
    * @param {string} reason One sentence.
    */
   function mediaFailed(button, reason) {
+    rememberMediaLabel(button);
     button.textContent = 'unavailable';
     button.title = reason;
     button.disabled = false;
     console.warn('Omnia clipper: ' + reason);
   }
 
+  /** Stash a media button's own label, once, before anything overwrites it. */
+  function rememberMediaLabel(button) {
+    if (button.dataset.omniaLabel === undefined) {
+      button.dataset.omniaLabel = button.textContent;
+    }
+  }
+
+  /** Put a media button back the way it was rendered, failure tooltip and all. */
+  function mediaReady(button) {
+    button.textContent = button.dataset.omniaLabel;
+    button.title = '';
+    button.disabled = false;
+  }
+
   /** Play a note's audio clip in place. */
   async function playMedia(button, filename) {
+    rememberMediaLabel(button);
     button.disabled = true;
-    const original = button.textContent;
     button.textContent = '…';
     const media = await fetchMedia(filename);
     if (!media.bytes) {
@@ -1156,12 +1187,12 @@
         return;
       }
     }
-    button.textContent = original;
-    button.disabled = false;
+    mediaReady(button);
   }
 
   /** Replace the button with the fetched image. */
   async function showMedia(button, filename) {
+    rememberMediaLabel(button);
     button.disabled = true;
     button.textContent = 'Loading…';
     const media = await fetchMedia(filename);

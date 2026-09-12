@@ -149,6 +149,9 @@ class FakeShadowRoot {
       const element = new FakeElement('button');
       element.attribute = attribute;
       element.value = match[1];
+      // The label the renderer gave it. Blank would hide the bug where a retry restores the
+      // button to whatever it said at the top of the click — i.e. to "unavailable".
+      element.textContent = attribute === 'data-omnia-audio' ? '▶ Play' : '';
       element.dataset[datasetKey(attribute)] = match[1];
       found.push(element);
       this.bound.push(element);
@@ -575,6 +578,48 @@ const tests = {
 
     assert.strictEqual(playButton(page).title, 'Media file not found.');
   },
+
+  'a button that failed and then worked stops saying it is broken': async function () {
+    // Anki closed, then opened. The retry plays — and the button used to be restored to the
+    // label it carried at the top of THAT click, which was "unavailable", with the stale
+    // tooltip still on it. It then claimed to be broken for the life of the panel while
+    // playing sound on every press.
+    const audio = makeWebAudio({decode: true});
+    const page = await pressPlay({audio: audio, element: makeAudioElement({play: true})});
+    answer(page.chrome, pending(page.chrome, 'omnia-media'), {
+      ok: false,
+      error: 'Anki did not answer.',
+    });
+    await settle();
+    assert.strictEqual(playButton(page).textContent, 'unavailable', 'the first failure');
+
+    press(page, 'data-omnia-audio', 'run.mp3');
+    answer(page.chrome, pending(page.chrome, 'omnia-media'), {ok: true, base64: 'AAEC'});
+    await settle();
+
+    const button = playButton(page);
+    assert.strictEqual(audio.plays.length, 1, 'the retry never played');
+    assert.strictEqual(button.textContent, '▶ Play', 'the retry restored the failure label');
+    assert.strictEqual(button.title, '', 'the stale reason is still on the button');
+  },
+
+  'a worker Chrome killed mid-request does not send the user to reload the page':
+    async function () {
+      // lastError in the CALLBACK means the MV3 worker was terminated while the fetch was in
+      // flight. The page is fine; pressing again wakes it. "Omnia was updated — reload this
+      // page" would destroy the panel and the selection to fix nothing.
+      const page = await pressPlay({
+        audio: makeWebAudio({decode: true}),
+        element: makeAudioElement({play: true}),
+      });
+
+      loseAnswer(page.chrome, pending(page.chrome, 'omnia-media'));
+      await settle();
+
+      const title = playButton(page).title;
+      assert.ok(title.indexOf('press it again') !== -1, 'unhelpful reason: ' + title);
+      assert.ok(title.indexOf('reload') === -1, 'it told the user to reload: ' + title);
+    },
 
   'the panel keeps ONE audio context, and closes it when the extension goes':
     async function () {
