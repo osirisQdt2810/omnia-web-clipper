@@ -149,6 +149,9 @@ class FakeShadowRoot {
       const element = new FakeElement('button');
       element.attribute = attribute;
       element.value = match[1];
+      // The label the renderer gave it. Blank would hide the bug where a retry restores the
+      // button to whatever it said at the top of the click — i.e. to "unavailable".
+      element.textContent = attribute === 'data-omnia-audio' ? '▶ Play' : '';
       element.dataset[datasetKey(attribute)] = match[1];
       found.push(element);
       this.bound.push(element);
@@ -280,10 +283,77 @@ function loseAnswer(chrome, entry) {
 // -- loading content.js ----------------------------------------------------------------------
 
 /**
+ * A Web Audio stack that records what it was asked to do.
+ *
+ * `decode` decides whether `decodeAudioData` resolves, which is how a test says "this build
+ * cannot decode that container" and makes the element fallback the only way through.
+ *
+ * @param {{decode: boolean}} options How it should behave.
+ * @return {!Object} `{Ctx, plays, contexts}`.
+ */
+function makeWebAudio(options) {
+  const plays = [];
+  const contexts = [];
+  class FakeAudioContext {
+    constructor() {
+      this.state = 'suspended';
+      this.destination = {};
+      this.closed = false;
+      contexts.push(this);
+    }
+
+    resume() {
+      this.state = 'running';
+      return Promise.resolve();
+    }
+
+    decodeAudioData(buffer) {
+      return options.decode
+        ? Promise.resolve({duration: 1.5, bytes: buffer.byteLength})
+        : Promise.reject(new Error('unsupported container'));
+    }
+
+    createBufferSource() {
+      const source = {
+        buffer: null,
+        connect: function () {},
+        start: function () {
+          plays.push(source.buffer);
+        },
+      };
+      return source;
+    }
+
+    close() {
+      this.closed = true;
+      return Promise.resolve();
+    }
+  }
+  return {Ctx: FakeAudioContext, plays: plays, contexts: contexts};
+}
+
+/** An `<audio>` element that records every URL it was asked to play. */
+function makeAudioElement(options) {
+  const played = [];
+  function FakeAudio(url) {
+    this.src = url;
+    played.push(url);
+    this.addEventListener = function () {};
+    this.play = function () {
+      return options.play
+        ? Promise.resolve()
+        : Promise.reject(new Error('NotSupportedError: blocked by the page'));
+    };
+  }
+  return {Audio: FakeAudio, played: played};
+}
+
+/**
  * Load lookup_view.js + content.js against a fresh fake page.
+ * @param {{audio: ?Object, element: ?Object}=} media What the page can play, if anything.
  * @return {!Object} `{document, chrome, window}` — the page the content script now drives.
  */
-function loadContentScript() {
+function loadContentScript(media) {
   const scope = {};
   vm.compileFunction(fs.readFileSync(path.join(SRC, 'lookup_view.js'), 'utf8'), ['self'], {
     filename: 'lookup_view.js',
@@ -294,6 +364,12 @@ function loadContentScript() {
   const win = scope;
   win.innerWidth = 1280;
   win.innerHeight = 800;
+  if (media && media.audio) {
+    win.AudioContext = media.audio.Ctx;
+  }
+  if (media && media.element) {
+    win.Audio = media.element.Audio;
+  }
   win.getSelection = function () {
     return {
       rangeCount: 1,
@@ -356,6 +432,54 @@ async function openLookup(page) {
   pill.children[1].fire('mousedown');
 }
 
+/** One note whose field carries a clip, so the panel renders a ▶ Play button. */
+function clipResult() {
+  return {
+    word: 'run',
+    found: true,
+    can_regenerate: true,
+    cards: [
+      {
+        note_id: 11,
+        note_type: 'Vocabulary',
+        deck: 'English::Verbs',
+        title: 'run (verb)',
+        state: 'review',
+        fields: [
+          {
+            name: 'Word (audio)',
+            text: '',
+            audio: ['run.mp3'],
+            images: [],
+            empty: false,
+            state: 'ready',
+          },
+        ],
+      },
+    ],
+  };
+}
+
+/**
+ * Open a panel on a note with a clip and press its ▶ Play.
+ * @param {!Object} media What the page can play (see makeWebAudio / makeAudioElement).
+ * @return {!Promise<!Object>} The page, with the media request pending.
+ */
+async function pressPlay(media) {
+  const page = loadContentScript(media);
+  await openLookup(page);
+  answer(page.chrome, pending(page.chrome, 'omnia-lookup'), {ok: true, result: clipResult()});
+  press(page, 'data-omnia-audio', 'run.mp3');
+  return page;
+}
+
+/** The ▶ Play button the panel is currently showing. */
+function playButton(page) {
+  return panel(page).bound.filter(function (element) {
+    return element.attribute === 'data-omnia-audio';
+  })[0];
+}
+
 /** Two matches that share a field name, so a leaked message reads as an answer. */
 function twinNoteResult() {
   return {
@@ -396,6 +520,123 @@ async function openPanel() {
 }
 
 const tests = {
+  'a clip is decoded and played, never loaded from a URL': async function () {
+    // The bug this exists for: an <audio> element pointed at a blob: URL is a RESOURCE LOAD,
+    // and a page with `default-src 'self'` refuses it — so every sound on such a site failed
+    // with NotSupportedError and the panel said "unavailable". Web Audio decodes bytes we
+    // already hold, and a CSP has nothing to refuse.
+    const audio = makeWebAudio({decode: true});
+    const element = makeAudioElement({play: false});
+    const page = await pressPlay({audio: audio, element: element});
+
+    answer(page.chrome, pending(page.chrome, 'omnia-media'), {ok: true, base64: 'AAEC'});
+    await settle();
+
+    assert.strictEqual(audio.plays.length, 1, 'the clip was not played through Web Audio');
+    assert.deepStrictEqual(element.played, [], 'it must not fall back while decoding worked');
+    // The label is restored to whatever it was (the fake button starts blank) and the control
+    // is live again — what matters is that it is not the failure state.
+    assert.notStrictEqual(playButton(page).textContent, 'unavailable');
+    assert.strictEqual(playButton(page).disabled, false, 'the button was left disabled');
+  },
+
+  'a container Web Audio cannot decode still plays through the element': async function () {
+    const audio = makeWebAudio({decode: false});
+    const element = makeAudioElement({play: true});
+    const page = await pressPlay({audio: audio, element: element});
+
+    answer(page.chrome, pending(page.chrome, 'omnia-media'), {ok: true, base64: 'AAEC'});
+    await settle();
+
+    assert.strictEqual(element.played.length, 1, 'the fallback never ran');
+    assert.notStrictEqual(playButton(page).textContent, 'unavailable');
+    assert.strictEqual(playButton(page).disabled, false);
+  },
+
+  'a clip nothing can play says so, once, on the button': async function () {
+    const audio = makeWebAudio({decode: false});
+    const element = makeAudioElement({play: false});
+    const page = await pressPlay({audio: audio, element: element});
+
+    answer(page.chrome, pending(page.chrome, 'omnia-media'), {ok: true, base64: 'AAEC'});
+    await settle();
+
+    const button = playButton(page);
+    assert.strictEqual(button.textContent, 'unavailable');
+    assert.ok(button.title.indexOf('would not play') !== -1, 'no reason on the button: ' + button.title);
+  },
+
+  "a missing file names ANKI's reason, not a bare \"unavailable\"": async function () {
+    // "unavailable" alone sent the user looking for a problem the worker had already named.
+    const page = await pressPlay({audio: makeWebAudio({decode: true}), element: makeAudioElement({play: true})});
+
+    answer(page.chrome, pending(page.chrome, 'omnia-media'), {
+      ok: false,
+      error: 'Media file not found.',
+    });
+    await settle();
+
+    assert.strictEqual(playButton(page).title, 'Media file not found.');
+  },
+
+  'a button that failed and then worked stops saying it is broken': async function () {
+    // Anki closed, then opened. The retry plays — and the button used to be restored to the
+    // label it carried at the top of THAT click, which was "unavailable", with the stale
+    // tooltip still on it. It then claimed to be broken for the life of the panel while
+    // playing sound on every press.
+    const audio = makeWebAudio({decode: true});
+    const page = await pressPlay({audio: audio, element: makeAudioElement({play: true})});
+    answer(page.chrome, pending(page.chrome, 'omnia-media'), {
+      ok: false,
+      error: 'Anki did not answer.',
+    });
+    await settle();
+    assert.strictEqual(playButton(page).textContent, 'unavailable', 'the first failure');
+
+    press(page, 'data-omnia-audio', 'run.mp3');
+    answer(page.chrome, pending(page.chrome, 'omnia-media'), {ok: true, base64: 'AAEC'});
+    await settle();
+
+    const button = playButton(page);
+    assert.strictEqual(audio.plays.length, 1, 'the retry never played');
+    assert.strictEqual(button.textContent, '▶ Play', 'the retry restored the failure label');
+    assert.strictEqual(button.title, '', 'the stale reason is still on the button');
+  },
+
+  'a worker Chrome killed mid-request does not send the user to reload the page':
+    async function () {
+      // lastError in the CALLBACK means the MV3 worker was terminated while the fetch was in
+      // flight. The page is fine; pressing again wakes it. "Omnia was updated — reload this
+      // page" would destroy the panel and the selection to fix nothing.
+      const page = await pressPlay({
+        audio: makeWebAudio({decode: true}),
+        element: makeAudioElement({play: true}),
+      });
+
+      loseAnswer(page.chrome, pending(page.chrome, 'omnia-media'));
+      await settle();
+
+      const title = playButton(page).title;
+      assert.ok(title.indexOf('press it again') !== -1, 'unhelpful reason: ' + title);
+      assert.ok(title.indexOf('reload') === -1, 'it told the user to reload: ' + title);
+    },
+
+  'the panel keeps ONE audio context, and closes it when the extension goes':
+    async function () {
+      // A browser allows a page only a handful; one per click runs out after a few plays.
+      const audio = makeWebAudio({decode: true});
+      const page = await pressPlay({audio: audio, element: makeAudioElement({play: true})});
+      answer(page.chrome, pending(page.chrome, 'omnia-media'), {ok: true, base64: 'AAEC'});
+      await settle();
+      press(page, 'data-omnia-audio', 'run.mp3');
+      answer(page.chrome, pending(page.chrome, 'omnia-media'), {ok: true, base64: 'AAEC'});
+      await settle();
+
+      assert.strictEqual(audio.contexts.length, 1, 'a context per click');
+      page.window.__omniaClipperTeardown();
+      assert.strictEqual(audio.contexts[0].closed, true, 'the context outlived the panel');
+    },
+
   'the panel opens on the note the lookup found': async function () {
     const page = await openPanel();
     const html = panel(page).innerHTML;
