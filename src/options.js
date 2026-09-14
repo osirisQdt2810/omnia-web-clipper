@@ -309,13 +309,6 @@
     return true;
   }
 
-  /** Drop the query string, so what Omnia asked for in the URL does not sit in history. */
-  function stripQuery() {
-    if (window.history && window.history.replaceState) {
-      window.history.replaceState({}, '', 'options.html');
-    }
-  }
-
   /** Wire the page up and populate it. Everything after the URL has been dealt with. */
   function init() {
     el('saveBtn').addEventListener('click', onSave);

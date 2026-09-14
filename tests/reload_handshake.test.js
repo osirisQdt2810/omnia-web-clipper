@@ -24,8 +24,8 @@ const TTL_MS = 30000;
 /** The slice of shared.js both halves destructure. Loaded for real below. */
 function sharedExports() {
   // A function loaded here keeps THIS sandbox's globals, not the caller's, so anything shared.js
-  // reaches for at call time has to be here -- readTokenFromSearch needs URLSearchParams, and
-  // without it the token handoff silently reads as "no token was handed over".
+  // reaches for at call time has to be here -- a missing global does not throw at load, it
+  // throws (or quietly reads as absent) at the moment the handshake needs it.
   const sandbox = {
     self: {},
     fetch: async function () { return {}; },
@@ -177,8 +177,8 @@ function runOptions(search) {
     self: {OmniaClipper: Object.assign({}, sharedExports(), {
       loadSettings: async function () { return {}; },
       saveSettings: async function (patch) {
-        // Recorded, not swallowed: the token handoff below is a WRITE that has to happen in a
-        // particular order relative to the reload, and an ignored stub cannot show that.
+        // Recorded, not swallowed: what the page writes has to happen in a particular order
+        // relative to the reload, and an ignored stub cannot show that.
         saved.push(patch);
         chrome.calls.push('saveSettings');
       },
@@ -197,7 +197,7 @@ function runOptions(search) {
   return {chrome: chrome, body: body, saved: saved};
 }
 
-/** Let the page's promise chain settle (the token is stored asynchronously). */
+/** Let the page's promise chain settle (the flag is stored asynchronously). */
 function settle() {
   return new Promise(function (resolve) { setTimeout(resolve, 0); });
 }
@@ -328,9 +328,6 @@ const tests = {
         'would re-trigger the handshake for ever'
     );
   },
-
-
-
 
   'the two halves share ONE key definition': function () {
     const shared = sharedExports();

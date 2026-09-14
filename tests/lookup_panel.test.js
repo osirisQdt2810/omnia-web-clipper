@@ -728,7 +728,6 @@ const tests = {
     assert.ok(!/409/.test(conflict), 'a bare status code is not something a person can act on');
   },
 
-
   '403 says something that is true, and something that can be done': function () {
     const message = shared.generateErrorMessage(403, null);
     assert.ok(
@@ -744,7 +743,6 @@ const tests = {
         'about it: ' + message
     );
   },
-
 
   'the "Regenerate from clippers" remedy names the tab that holds it': function () {
     // The switch is on the GENERAL tab of Smart Notes' options (sn-opt-regen-clippers sits in
@@ -767,8 +765,6 @@ const tests = {
     assert.ok(/Smart Notes/.test(message), 'the actionable sentence still leads');
     assert.ok(/collection is busy/.test(message), 'and the detail is not thrown away');
   },
-
-
 
   'the panel never talks to the network itself': function () {
     const content = fs.readFileSync(path.join(SRC, 'content.js'), 'utf8');

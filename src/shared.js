@@ -19,8 +19,6 @@
     // from AnkiConnect, and reached from the background worker (see background.js lookupWord).
     lookupUrl: 'http://127.0.0.1:8766',
     lookupEnabled: true, // Show the magnifier next to the "+".
-    // Shared secret for the add-on's WRITE endpoint (/generate). Reading is unauthenticated;
-    // regenerating spends the user's LLM credits, so it is not. Typed on the options page, or
     apiKey: '', // AnkiConnect "apiKey" option; empty when AnkiConnect apiKey is null.
     enabled: true, // Master on/off. When false, no "+" and no context-menu action.
     mouseEnabled: true, // Double-click "+" tooltip on/off (the right-click menu is unaffected).
@@ -49,7 +47,10 @@
   //
   // Kept rather than deleted because the RULE is what matters, and it is not obvious: anything
   // issued by this machine's copy of Omnia, or true only of this machine, belongs here and not
-  // in sync. Adding a key to this list is the whole migration.
+  // in sync. Adding a key here routes it to local in both directions and is the whole of it --
+  // there is no migration helper standing by, because a key that has never been synced does not
+  // need moving. One that HAS been (the token was) needs a one-time removal instead, of the
+  // shape background.js::forgetTheToken uses.
   const LOCAL_KEYS = [];
 
   /**
@@ -82,39 +83,11 @@
           const merged = Object.assign({}, DEFAULTS, stored);
           merged.fieldMap = Object.assign({}, DEFAULTS.fieldMap, stored.fieldMap || {});
           LOCAL_KEYS.forEach((key) => {
-            const own = local[key];
-            const synced = stored[key];
-            // A value still in sync was written by a build that stored it there. Adopt it so
-            // nobody has to re-enter a setting that already works, and move it out of sync.
-            merged[key] = own || synced || DEFAULTS[key];
-            if (!own && synced) {
-              migrateOutOfSync(key, synced);
-            }
+            merged[key] = local[key] === undefined ? DEFAULTS[key] : local[key];
           });
           resolve(merged);
         });
       });
-    });
-  }
-
-  /**
-   * Move a value an older build left in chrome.storage.sync into chrome.storage.local.
-   *
-   * Fire-and-forget: the caller already has the value in hand, so a failed write costs nothing
-   * but a second attempt on the next read. The sync copy is removed only once the local one is
-   * written, so an interrupted migration loses nothing.
-   *
-   * @param {string} key The settings key being moved.
-   * @param {*} value The value found in sync.
-   */
-  function migrateOutOfSync(key, value) {
-    const patch = {};
-    patch[key] = value;
-    chrome.storage.local.set(patch, () => {
-      if (chrome.runtime.lastError) {
-        return;
-      }
-      chrome.storage.sync.remove(key, () => void chrome.runtime.lastError);
     });
   }
 
@@ -307,7 +280,6 @@
   function buildGenerateUrl(baseUrl) {
     return normaliseBase(baseUrl) + GENERATE_PATH;
   }
-
 
   /**
    * Turn a /generate HTTP failure into a sentence naming the remedy.

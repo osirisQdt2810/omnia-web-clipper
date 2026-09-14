@@ -260,9 +260,6 @@ const tests = {
     );
   },
 
-
-
-
   'a /generate is given a deadline, and a missed one says so': async function () {
     const worker = runWorker({
       settings: SETTINGS,
