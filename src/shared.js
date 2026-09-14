@@ -231,6 +231,43 @@
     "Can't reach Anki's lookup service. Make sure Anki is running with Omnia's " +
     '“Word Lookup” feature switched on.';
 
+  /**
+   * What actually went wrong looking a word up.
+   *
+   * Every failure used to come back as LOOKUP_UNREACHABLE, which is a sentence about ONE cause
+   * and was printed for all of them. A service address typed into the wrong box on the options
+   * page, a stale port, an answer that is not JSON — each told the user to go and check that
+   * Word Lookup was switched on, and it already was. "Could not reach it" is only true when
+   * nothing answered, and `fetch` says so by rejecting with a TypeError; anything else got an
+   * answer and has something more useful to report.
+   *
+   * @param {*} err Whatever the lookup threw.
+   * @param {string} baseUrl The address it tried, so the message can name it.
+   * @return {string} A sentence naming what to do about it.
+   */
+  function lookupErrorMessage(err, baseUrl) {
+    const url = normaliseBase(baseUrl);
+    if (!/^https?:\/\//i.test(url)) {
+      return (
+        'The lookup service address is not a URL: “' + url + '”. Open this extension\'s ' +
+        'options and check the Lookup service box — it should read http://127.0.0.1:8766.'
+      );
+    }
+    if (err && err.name === 'AbortError') {
+      return 'The lookup took too long. Anki may be busy — try again in a moment.';
+    }
+    // By NAME rather than `instanceof`: this module is loaded into its own realm by the tests
+    // (and a service worker is a realm of its own too), where `TypeError` is a different
+    // constructor and `instanceof` is quietly false for a genuine TypeError.
+    if (err && err.name === 'TypeError') {
+      // fetch rejects with a TypeError when nothing answered at all: wrong port, Anki closed,
+      // the feature switched off. This is the one case the original sentence was written for.
+      return LOOKUP_UNREACHABLE + ' It is being asked at ' + url + '.';
+    }
+    return (err && err.message ? err.message : String(err)) +
+      ' (asked at ' + url + ')';
+  }
+
   // How long one /generate may take. The same budget the desktop clipper gives it
   // (omnia_desktop_clipper/lookup/generate.py::_TIMEOUT_SECONDS) and generous on purpose: an
   // LLM field plus a TTS clip regularly takes half a minute, and a whole note asks for several
@@ -439,6 +476,7 @@
     TOKEN_HEADER: TOKEN_HEADER,
     TOKEN_PARAM: TOKEN_PARAM,
     LOOKUP_UNREACHABLE: LOOKUP_UNREACHABLE,
+    lookupErrorMessage: lookupErrorMessage,
     GENERATE_TIMEOUT_MS: GENERATE_TIMEOUT_MS,
     GENERATE_TIMED_OUT: GENERATE_TIMED_OUT,
     DEFAULTS: DEFAULTS,

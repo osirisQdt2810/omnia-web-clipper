@@ -16,7 +16,7 @@
 
 importScripts('shared.js');
 
-const {loadSettings, ankiConnect, buildLookupUrl, requestGenerate, LOOKUP_UNREACHABLE} =
+const {loadSettings, ankiConnect, buildLookupUrl, requestGenerate, lookupErrorMessage} =
   self.OmniaClipper;
 
 const CONTEXT_MENU_ID = 'omnia-clipper-send-selection';
@@ -325,7 +325,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         const base = settings.lookupUrl || 'http://127.0.0.1:8766';
         sendResponse({ok: true, result: await lookupWord(message.word, base)});
       } catch (err) {
-        sendResponse({ok: false, error: LOOKUP_UNREACHABLE});
+        // The real reason, not one guess printed for every cause. See
+        // shared.js::lookupErrorMessage.
+        const base = (await loadSettings()).lookupUrl || 'http://127.0.0.1:8766';
+        sendResponse({ok: false, error: lookupErrorMessage(err, base)});
       }
     })();
     return true;  // async sendResponse
