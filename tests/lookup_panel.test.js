@@ -728,18 +728,6 @@ const tests = {
     assert.ok(!/409/.test(conflict), 'a bare status code is not something a person can act on');
   },
 
-  '401 sends the user where the token actually IS': function () {
-    const message = shared.generateErrorMessage(401, null);
-    assert.ok(/token/i.test(message), '401 is the token; the message must say so');
-    assert.ok(
-      /Word Lookup/.test(message),
-      'the token is shown in Anki under Tools → Omnia → Word Lookup → Configure…, and NOWHERE ' +
-        'else. Smart Notes → Integrations holds Lookup…/Install/Reload and no token at all, ' +
-        'so sending someone there is sending them to look for something that is not there: ' +
-        message
-    );
-  },
-
   '403 says something that is true, and something that can be done': function () {
     const message = shared.generateErrorMessage(403, null);
     assert.ok(
@@ -754,32 +742,6 @@ const tests = {
         'makes — that is what the message has to say, because it is the only true thing ' +
         'about it: ' + message
     );
-  },
-
-  'no message sends anyone to Integrations for the token': function () {
-    // Three files and a README repeated the same wrong route, and each looked plausible alone.
-    // options.html is in the list because it is where the token is actually typed: a hint that
-    // names the wrong menu there is the one the user reads at exactly the wrong moment.
-    const sources = ['shared.js', 'lookup_view.js', 'content.js', 'options.html'].map(
-      function (name) {
-        return {name: name, text: fs.readFileSync(path.join(SRC, name), 'utf8')};
-      }
-    );
-    sources.push({
-      name: 'README.md',
-      text: fs.readFileSync(path.join(SRC, '..', 'README.md'), 'utf8'),
-    });
-    sources.forEach(function (source) {
-      // `&rarr;` too, or the HTML page — the one place the token is actually typed — would
-      // sail through a check written for the arrow character.
-      const flat = source.text.replace(/&rarr;/g, '→').replace(/\s+/g, ' ');
-      assert.ok(
-        !/token[\s\S]{0,200}?Smart Notes → Configure → Integrations/.test(flat),
-        source.name + ' tells the user to fetch the token from the Smart Notes Integrations ' +
-          'tab. That card has Lookup… / Install / Reload on it and nothing else; the token is ' +
-          'in Tools → Omnia → Word Lookup → Configure….'
-      );
-    });
   },
 
   'the "Regenerate from clippers" remedy names the tab that holds it': function () {
@@ -802,32 +764,6 @@ const tests = {
     const message = shared.generateErrorMessage(503, {error: 'collection is busy'});
     assert.ok(/Smart Notes/.test(message), 'the actionable sentence still leads');
     assert.ok(/collection is busy/.test(message), 'and the detail is not thrown away');
-  },
-
-  'the token can be handed over in the options URL': function () {
-    assert.strictEqual(shared.readTokenFromSearch('?omnia-token=abc123'), 'abc123');
-    assert.strictEqual(
-      shared.readTokenFromSearch('?omnia-reload=1&omnia-token=abc123'),
-      'abc123',
-      'Omnia hands the token over on the same URL that asks for a reload'
-    );
-    assert.strictEqual(shared.readTokenFromSearch(''), '');
-    assert.strictEqual(shared.readTokenFromSearch('?other=1'), '');
-  },
-
-  'the token has a default, so a fresh profile reads "" and not undefined': function () {
-    assert.strictEqual(
-      shared.DEFAULTS.lookupToken,
-      '',
-      'a key missing from DEFAULTS never comes back from chrome.storage.get(DEFAULTS)'
-    );
-    assert.deepStrictEqual(
-      shared.LOCAL_KEYS,
-      ['lookupToken'],
-      'the token is the one setting that must NOT be synced: it authenticates against a ' +
-        "loopback service on this machine, issued by this machine's Omnia, so syncing it " +
-        'uploads a secret to Google and copies it into profiles where it cannot work'
-    );
   },
 
   'the panel never talks to the network itself': function () {

@@ -47,8 +47,9 @@ const DEFAULT = 'http://127.0.0.1:8766';
 // -- the address is not an address ------------------------------------------------------------
 
 {
-  // The case that produced this file: the token pasted into the Lookup service box. Every fetch
-  // fails, and "make sure Word Lookup is on" sends the user to a switch that is already on.
+  // The case that produced this file: a value pasted into the Lookup service box that is not a
+  // URL at all. Every fetch fails, and "make sure Word Lookup is on" sends the user to a switch
+  // that is already on.
   const message = lookupErrorMessage(new TypeError('Failed to parse URL'), 'a1b2c3d4e5');
   assert.ok(
     message.includes('not a URL'),

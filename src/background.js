@@ -232,7 +232,31 @@ async function reinjectContentScript() {
 chrome.runtime.onInstalled.addListener(() => {
   registerContextMenu();
   reinjectContentScript();
+  forgetTheToken();
 });
+
+/**
+ * Delete a `lookupToken` left behind by an older build.
+ *
+ * Nothing reads it any more, which is exactly the problem: it is gone from DEFAULTS and from
+ * LOCAL_KEYS, so `loadSettings` no longer returns it and the migration that used to move it out
+ * of sync no longer runs. A profile whose last run was a pre-split build would keep a secret
+ * replicated to Google's servers -- and into every Chrome profile signed into that account --
+ * for ever, with no code path left that could remove it.
+ *
+ * Both stores, because the split moved it between them and either may hold a copy. Failures are
+ * swallowed: this is housekeeping, and a profile that cannot be cleaned is no worse off than
+ * before.
+ */
+function forgetTheToken() {
+  ['sync', 'local'].forEach((area) => {
+    try {
+      chrome.storage[area].remove('lookupToken', () => void chrome.runtime.lastError);
+    } catch (_e) {
+      // The storage area is unavailable; there is nothing to clean and nothing to report.
+    }
+  });
+}
 
 // The service worker may restart between events; re-assert the menu on startup.
 if (chrome.runtime.onStartup) {
@@ -343,9 +367,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       try {
         const settings = await loadSettings();
         const base = settings.lookupUrl || 'http://127.0.0.1:8766';
-        const result = await requestGenerate(
-          base, settings.lookupToken || '', message.noteId, message.fields,
-        );
+        const result = await requestGenerate(base, message.noteId, message.fields);
         sendResponse({ok: true, result: result});
       } catch (err) {
         sendResponse({ok: false, error: err && err.message ? err.message : String(err)});

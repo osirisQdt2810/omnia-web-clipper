@@ -93,13 +93,6 @@ from AnkiConnect:
   generates the remaining fields. On by default.
 - **Lookup service URL** — where Omnia's own loopback service listens; default
   `http://127.0.0.1:8766`. This is *not* AnkiConnect.
-- **Omnia access token** — needed only to **regenerate** fields from the lookup panel. Copy it
-  from Anki (**Tools → Omnia → Word Lookup → Configure…**, the *Clipper access token* box —
-  Omnia issues it the first time Word Lookup is enabled); Omnia can also fill it in for you by
-  opening this page with the token in the URL. Looking a word up needs no token; regenerating
-  does, because it rewrites the note and spends your LLM credits. It is kept in
-  `chrome.storage.local`, **not** synced: it authenticates against a loopback service on *this*
-  machine, and every machine's Omnia issues its own.
 
 ---
 
@@ -170,8 +163,9 @@ clipper uses `omnia-desktop-clipper` with its own toggle.)
   → Smart Notes → Configure → Options → General**, then look the word up again.
 - **Regenerating says Smart Notes is not available** → the Smart Notes plugin is off in **Tools →
   Omnia**, or Anki is busy with something else. Enable it and retry.
-- **Regenerating says Omnia rejected the token** → paste the token from **Tools → Omnia → Word
-  Lookup → Configure…** (the *Clipper access token* box) into Options.
+- **Regenerating says Omnia asked it to authenticate (401)** → the Omnia in Anki is older than
+  this extension. Nothing authenticates `/generate` any more and there is no token to enter;
+  update the add-on (**Tools → Add-ons → Check for Updates**).
 - **Regenerating says Omnia refused the request (403)** → the add-on accepts `/generate` from an
   extension (any `chrome-extension://` origin, by scheme) but never from a web page, so a 403 here
   means the request did not come from this extension's service worker. Reload the extension on
@@ -192,7 +186,7 @@ omnia-web-clipper/
 │   ├── content.js        # in-page glue: selection detection, the "+" pill, the panel's events
 │   ├── lookup_view.js    # pure: the lookup panel's view model + markup (no DOM, no chrome.*)
 │   ├── shared.js         # AnkiConnect + Omnia lookup/generate clients, settings, error messages
-│   ├── options.html/js   # options page (deck/note-type/field-map/tags/autogen/url/key/token)
+│   ├── options.html/js   # options page (deck/note-type/field-map/tags/autogen/url/key)
 │   └── popup.html/js     # toolbar popup (status + enable toggle)
 ├── assets/
 │   └── icons/            # extension icons

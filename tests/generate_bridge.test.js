@@ -40,16 +40,11 @@ function jsonResponse(status, body) {
 /**
  * Load background.js (and, for real, the shared.js it imports) with a mock `chrome`.
  *
- * Both storage areas are modelled, and every write to either is recorded: the lookup token is
- * deliberately kept OUT of chrome.storage.sync (it is a machine-local loopback credential), and
- * a stub with one area could not tell that apart from a token written wherever.
+ * Both storage areas are modelled and every write to either is recorded, so a test can tell
+ * "written to the right place" from "written wherever".
  *
- * @param {{settings: (!Object|undefined), local: (!Object|undefined),
- *          respond: (function(string, !Object)|undefined)}=} options
- *     settings: what chrome.storage.sync holds; local: what chrome.storage.local holds;
- *     respond: the fake network.
- * @return {!Object} `{requests, writes, storage, send}` — what went out, what was written,
- *     what each area holds now, and how to send the worker a message.
+ * @param {!Object=} options
+ * @return {!Object} The worker's surface: send(), plus what it read and wrote.
  */
 function runWorker(options) {
   const opts = options || {};
@@ -153,16 +148,16 @@ function runWorker(options) {
   };
 }
 
-// The synced half of the settings. The token is NOT here: it is a credential for a loopback
-// service on this machine, so it lives in chrome.storage.local (see LOCAL below).
 const SETTINGS = {
   ankiConnectUrl: 'http://127.0.0.1:8765',
   apiKey: '',
   lookupUrl: 'http://127.0.0.1:8766',
 };
 
-/** The machine-local half. */
-const LOCAL = {lookupToken: 'sekret'};
+/** The machine-local half. Nothing lives here any more, and the tests still model it so a
+ * future setting that belongs here has somewhere to go — and so "written to sync" stays a thing
+ * a test can catch. */
+const LOCAL = {};
 
 /** The header value, whatever case the header was written in. */
 function header(init, name) {
@@ -196,9 +191,9 @@ const tests = {
     assert.strictEqual(header(request.init, 'Content-Type'), 'application/json');
     assert.strictEqual(
       header(request.init, 'X-Omnia-Token'),
-      'sekret',
-      'the endpoint writes to the collection, so it is authenticated — and the token has to ' +
-        'be found in chrome.storage.LOCAL, which is where it is now kept'
+      undefined,
+      'the access token is gone; sending a header the add-on no longer reads is dead weight ' +
+        'that the next reader will think is authentication'
     );
     assert.deepStrictEqual(JSON.parse(request.init.body), {
       client: 'web_clipper',
@@ -262,80 +257,6 @@ const tests = {
       busyResponse.error,
       conflictResponse.error,
       'two different problems must not read as the same sentence'
-    );
-  },
-
-  'the token is read from LOCAL storage and never written to sync': async function () {
-    const worker = runWorker({
-      settings: SETTINGS,
-      local: LOCAL,
-      respond: function () { return jsonResponse(200, {note_id: 7, results: []}); },
-    });
-    await worker.send({type: 'omnia-generate', noteId: 7, fields: ['Definition']});
-    assert.strictEqual(
-      header(worker.requests[0].init, 'X-Omnia-Token'),
-      'sekret',
-      'a token in chrome.storage.local must still reach the request'
-    );
-    assert.ok(
-      worker.writes.every(function (w) {
-        return w.area !== 'sync' || (w.keys || []).indexOf('lookupToken') === -1;
-      }),
-      'the token was written to chrome.storage.sync, which replicates it to Google and to ' +
-        'every Chrome profile signed into the account — for a credential that only works on ' +
-        'the machine whose Omnia issued it'
-    );
-  },
-
-  'saving the form puts the token in local storage and the rest in sync': async function () {
-    const worker = runWorker({settings: SETTINGS, local: {}});
-    await worker.clipper.saveSettings({lookupToken: 'fresh', deckName: 'Omnia Capture'});
-    assert.strictEqual(worker.storage.local.lookupToken, 'fresh', 'the token must be kept');
-    assert.strictEqual(
-      worker.storage.sync.lookupToken,
-      undefined,
-      'pressing Save on the options page is the commonest way the token gets written — if it ' +
-        'goes to sync from here, moving the READ to local changed nothing'
-    );
-    assert.strictEqual(
-      worker.storage.sync.deckName,
-      'Omnia Capture',
-      'and every other setting still follows the user to their other machines'
-    );
-  },
-
-  'a token an older build left in sync is migrated, not lost': async function () {
-    const worker = runWorker({
-      // Exactly what an install that predates the split holds: the token still in sync.
-      settings: Object.assign({}, SETTINGS, {lookupToken: 'legacy'}),
-      local: {},
-      respond: function () { return jsonResponse(200, {note_id: 7, results: []}); },
-    });
-    await worker.send({type: 'omnia-generate', noteId: 7, fields: ['Definition']});
-    assert.strictEqual(
-      header(worker.requests[0].init, 'X-Omnia-Token'),
-      'legacy',
-      'the upgrade must not make the user re-enter a token that already works'
-    );
-    assert.strictEqual(
-      worker.storage.local.lookupToken,
-      'legacy',
-      'the token was not copied into local storage, so the next read starts over'
-    );
-    assert.strictEqual(
-      worker.storage.sync.lookupToken,
-      undefined,
-      'the synced copy has to GO — leaving it means the secret stays replicated for ever'
-    );
-    const copied = worker.writes.findIndex(function (w) {
-      return w.area === 'local' && (w.keys || []).indexOf('lookupToken') !== -1;
-    });
-    const dropped = worker.writes.findIndex(function (w) {
-      return w.area === 'sync' && w.removed === 'lookupToken';
-    });
-    assert.ok(
-      copied !== -1 && dropped !== -1 && copied < dropped,
-      'removing the synced copy first would lose the token outright if the local write failed'
     );
   },
 

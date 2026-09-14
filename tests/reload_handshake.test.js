@@ -24,8 +24,8 @@ const TTL_MS = 30000;
 /** The slice of shared.js both halves destructure. Loaded for real below. */
 function sharedExports() {
   // A function loaded here keeps THIS sandbox's globals, not the caller's, so anything shared.js
-  // reaches for at call time has to be here -- readTokenFromSearch needs URLSearchParams, and
-  // without it the token handoff silently reads as "no token was handed over".
+  // reaches for at call time has to be here -- a missing global does not throw at load, it
+  // throws (or quietly reads as absent) at the moment the handshake needs it.
   const sandbox = {
     self: {},
     fetch: async function () { return {}; },
@@ -177,8 +177,8 @@ function runOptions(search) {
     self: {OmniaClipper: Object.assign({}, sharedExports(), {
       loadSettings: async function () { return {}; },
       saveSettings: async function (patch) {
-        // Recorded, not swallowed: the token handoff below is a WRITE that has to happen in a
-        // particular order relative to the reload, and an ignored stub cannot show that.
+        // Recorded, not swallowed: what the page writes has to happen in a particular order
+        // relative to the reload, and an ignored stub cannot show that.
         saved.push(patch);
         chrome.calls.push('saveSettings');
       },
@@ -197,7 +197,7 @@ function runOptions(search) {
   return {chrome: chrome, body: body, saved: saved};
 }
 
-/** Let the page's promise chain settle (the token is stored asynchronously). */
+/** Let the page's promise chain settle (the flag is stored asynchronously). */
 function settle() {
   return new Promise(function (resolve) { setTimeout(resolve, 0); });
 }
@@ -326,46 +326,6 @@ const tests = {
       result.chrome.calls.includes('history.replaceState'),
       'if a future Chrome reloads this tab in place rather than closing it, the parameter ' +
         'would re-trigger the handshake for ever'
-    );
-  },
-
-  'options: a token in the URL is stored and then wiped from the address bar': async function () {
-    const result = runOptions('?omnia-token=abc123');
-    await settle();
-    const patch = result.saved.filter(function (p) {
-      return Object.prototype.hasOwnProperty.call(p, 'lookupToken');
-    })[0];
-    assert.ok(patch, 'Omnia handed the token over and the page did not keep it');
-    assert.strictEqual(patch.lookupToken, 'abc123');
-    assert.ok(
-      result.chrome.calls.includes('history.replaceState'),
-      'a shared secret must not sit in the address bar, or in the tab history behind it'
-    );
-    assert.ok(!result.chrome.calls.includes('runtime.reload'), 'a token alone is not a reload');
-  },
-
-  'options: a token that arrives WITH a reload is stored BEFORE the reload': async function () {
-    const result = runOptions('?omnia-reload=1&omnia-token=abc123');
-    await settle();
-    const stored = result.chrome.calls.indexOf('saveSettings');
-    const reloaded = result.chrome.calls.indexOf('runtime.reload');
-    assert.ok(stored !== -1, 'the token was dropped when the same URL also asked for a reload');
-    assert.ok(
-      reloaded !== -1 && stored < reloaded,
-      'chrome.runtime.reload() destroys this page: a write still in flight is lost, and the ' +
-        'user is left to copy the token by hand from Anki'
-    );
-    assert.strictEqual(result.saved[0].lookupToken, 'abc123');
-  },
-
-  'options: an ordinary open never overwrites the stored token': async function () {
-    const result = runOptions('');
-    await settle();
-    assert.ok(
-      result.saved.every(function (p) {
-        return !Object.prototype.hasOwnProperty.call(p, 'lookupToken');
-      }),
-      'opening Settings must not blank a token the user already has'
     );
   },
 

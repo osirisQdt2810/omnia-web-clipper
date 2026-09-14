@@ -14,7 +14,7 @@
 (() => {
   'use strict';
 
-  const {loadSettings, saveSettings, ankiConnect, readTokenFromSearch, REOPEN_OPTIONS_KEY} =
+  const {loadSettings, saveSettings, ankiConnect, REOPEN_OPTIONS_KEY} =
     self.OmniaClipper;
   // How long to wait before admitting the reload did not come back. Deliberately LONGER than
   // the worker's own validity window: offering the link sooner means a merely SLOW reload ends
@@ -139,7 +139,6 @@
     el('mouseToggle').setAttribute('aria-checked', String(s.mouseEnabled !== false));
     el('lookupToggle').setAttribute('aria-checked', String(s.lookupEnabled !== false));
     el('lookupUrl').value = s.lookupUrl || 'http://127.0.0.1:8766';
-    el('lookupToken').value = s.lookupToken || '';
     el('autogen').checked = s.autogen !== false;
 
     // Seed the dropdowns with the stored values so the page is usable even
@@ -173,7 +172,6 @@
       mouseEnabled: el('mouseToggle').getAttribute('aria-checked') === 'true',
       lookupEnabled: el('lookupToggle').getAttribute('aria-checked') === 'true',
       lookupUrl: el('lookupUrl').value.trim() || 'http://127.0.0.1:8766',
-      lookupToken: el('lookupToken').value.trim(),
       autogen: el('autogen').checked,
       deckName: el('deckName').value.trim() || 'Omnia Capture',
       modelName: el('modelName').value.trim() || 'Basic',
@@ -311,13 +309,6 @@
     return true;
   }
 
-  /** Drop the query string, so a token handed over in the URL does not sit in history. */
-  function stripQuery() {
-    if (window.history && window.history.replaceState) {
-      window.history.replaceState({}, '', 'options.html');
-    }
-  }
-
   /** Wire the page up and populate it. Everything after the URL has been dealt with. */
   function init() {
     el('saveBtn').addEventListener('click', onSave);
@@ -333,22 +324,10 @@
   }
 
   document.addEventListener('DOMContentLoaded', () => {
-    // Omnia hands the /generate token over the same way it asks for a reload: by opening this
-    // page with it in the query string. So it is read FIRST and, when there is one, stored
-    // BEFORE the reload handshake runs — chrome.runtime.reload() destroys this page, and a
-    // write still in flight would be lost, leaving the user to copy the token by hand.
-    const token = readTokenFromSearch(location.search);
-    if (!token) {
-      if (reloadIfOmniaAsked()) return;
-      init();
-      return;
-    }
-    saveSettings({lookupToken: token}).then(() => {
-      // reloadIfOmniaAsked strips the whole query itself; stripQuery is for the plain
-      // ?omnia-token=… case, so the secret does not linger in the address bar or in history.
-      if (reloadIfOmniaAsked()) return;
-      stripQuery();
-      init();
-    });
+    // Omnia asks for a reload by opening this page with a flag in the query string, so that is
+    // dealt with FIRST: chrome.runtime.reload() destroys this page, and anything init() had
+    // started would be lost half-done.
+    if (reloadIfOmniaAsked()) return;
+    init();
   });
 })();

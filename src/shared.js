@@ -19,11 +19,6 @@
     // from AnkiConnect, and reached from the background worker (see background.js lookupWord).
     lookupUrl: 'http://127.0.0.1:8766',
     lookupEnabled: true, // Show the magnifier next to the "+".
-    // Shared secret for the add-on's WRITE endpoint (/generate). Reading is unauthenticated;
-    // regenerating spends the user's LLM credits, so it is not. Typed on the options page, or
-    // handed over by Omnia as ?omnia-token=… when it opens Settings. Stored LOCALLY, unlike
-    // every other setting here — see LOCAL_KEYS.
-    lookupToken: '',
     apiKey: '', // AnkiConnect "apiKey" option; empty when AnkiConnect apiKey is null.
     enabled: true, // Master on/off. When false, no "+" and no context-menu action.
     mouseEnabled: true, // Double-click "+" tooltip on/off (the right-click menu is unaffected).
@@ -45,14 +40,18 @@
 
   // The settings that live in chrome.storage.LOCAL rather than chrome.storage.sync.
   //
-  // Everything else is a preference the user would want on their other machines, and sync is
-  // exactly right for it. The lookup token is not a preference: it is a credential for a
-  // loopback service running on THIS machine, issued by THIS machine's copy of Omnia. Syncing
-  // it uploads a secret to Google's servers and copies it into every Chrome profile signed into
-  // the account, where it cannot even work — the Omnia over there issued a different one. So the
-  // split is not tidiness; it is the difference between a machine-local secret staying local
-  // and being replicated to places that have no use for it.
-  const LOCAL_KEYS = ['lookupToken'];
+  // EMPTY, and correctly so: every setting the clipper has is a preference the user would want
+  // on their other machines, and sync is exactly right for all of them. The list existed for the
+  // lookup token — a machine-local credential that syncing would have replicated to profiles
+  // where it could not work — and that is gone.
+  //
+  // Kept rather than deleted because the RULE is what matters, and it is not obvious: anything
+  // issued by this machine's copy of Omnia, or true only of this machine, belongs here and not
+  // in sync. Adding a key here routes it to local in both directions and is the whole of it --
+  // there is no migration helper standing by, because a key that has never been synced does not
+  // need moving. One that HAS been (the token was) needs a one-time removal instead, of the
+  // shape background.js::forgetTheToken uses.
+  const LOCAL_KEYS = [];
 
   /**
    * Whether a settings key belongs in chrome.storage.local.
@@ -84,39 +83,11 @@
           const merged = Object.assign({}, DEFAULTS, stored);
           merged.fieldMap = Object.assign({}, DEFAULTS.fieldMap, stored.fieldMap || {});
           LOCAL_KEYS.forEach((key) => {
-            const own = local[key];
-            const synced = stored[key];
-            // A value still in sync was written by a build that stored it there. Adopt it so
-            // nobody has to re-enter a token that already works, and move it out of sync.
-            merged[key] = own || synced || DEFAULTS[key];
-            if (!own && synced) {
-              migrateOutOfSync(key, synced);
-            }
+            merged[key] = local[key] === undefined ? DEFAULTS[key] : local[key];
           });
           resolve(merged);
         });
       });
-    });
-  }
-
-  /**
-   * Move a value an older build left in chrome.storage.sync into chrome.storage.local.
-   *
-   * Fire-and-forget: the caller already has the value in hand, so a failed write costs nothing
-   * but a second attempt on the next read. The sync copy is removed only once the local one is
-   * written, so an interrupted migration loses nothing.
-   *
-   * @param {string} key The settings key being moved.
-   * @param {*} value The value found in sync.
-   */
-  function migrateOutOfSync(key, value) {
-    const patch = {};
-    patch[key] = value;
-    chrome.storage.local.set(patch, () => {
-      if (chrome.runtime.lastError) {
-        return;
-      }
-      chrome.storage.sync.remove(key, () => void chrome.runtime.lastError);
     });
   }
 
@@ -222,10 +193,6 @@
   const LOOKUP_CLIENT = 'web_clipper';
   const GENERATE_PATH = '/generate';
   const LOOKUP_PATH = '/lookup';
-  const TOKEN_HEADER = 'X-Omnia-Token';
-  // How Omnia hands the token to this extension: it opens the options page with the token in
-  // the query string (the same route the Reload handshake uses), so nobody has to copy it.
-  const TOKEN_PARAM = 'omnia-token';
 
   const LOOKUP_UNREACHABLE =
     "Can't reach Anki's lookup service. Make sure Anki is running with Omnia's " +
@@ -315,19 +282,6 @@
   }
 
   /**
-   * Read the token Omnia may have put in the options page's query string.
-   * @param {string} search The location.search to parse.
-   * @return {string} The token, or '' when there is none.
-   */
-  function readTokenFromSearch(search) {
-    try {
-      return (new URLSearchParams(search || '').get(TOKEN_PARAM) || '').trim();
-    } catch (_e) {
-      return ''; // no URLSearchParams / no location: nothing was handed over
-    }
-  }
-
-  /**
    * Turn a /generate HTTP failure into a sentence naming the remedy.
    *
    * A status code on its own is not actionable, and these two in particular have a specific
@@ -350,9 +304,9 @@
         'Omnia could not read the request (400). This is a bug in the clipper — ' +
         'please report it.',
       401:
-        'Omnia rejected the access token (401). Copy the token from Anki ' +
-        '(Tools → Omnia → Word Lookup → Configure…, “Clipper access token”) into this ' +
-        'extension’s Options.',
+        'Omnia asked this request to authenticate (401), which this clipper no longer does and ' +
+        'current versions no longer ask for. The Omnia running in Anki is older than this ' +
+        'extension — update the add-on (Tools → Add-ons → Check for Updates).',
       403:
         'Omnia refused the request (403) because it did not come from this extension’s ' +
         'background worker — the add-on accepts /generate only from an extension, never from ' +
@@ -374,20 +328,17 @@
    * already-actionable Error.
    *
    * @param {string} baseUrl Where the add-on's lookup service listens.
-   * @param {string} token The shared secret from settings (sent even when empty, so the
-   *     add-on's own 401 explains it rather than this half guessing).
    * @param {number} noteId The note to regenerate.
    * @param {?Array<string>=} fields Which fields, or null/undefined for every field.
    * @return {!Promise<!Object>} `{note_id, results: [{field, status, message, ...}]}`.
    */
-  async function requestGenerate(baseUrl, token, noteId, fields) {
+  async function requestGenerate(baseUrl, noteId, fields) {
     const body = {
       client: LOOKUP_CLIENT,
       note_id: Number(noteId),
       fields: Array.isArray(fields) && fields.length ? fields : null,
     };
     const headers = {'Content-Type': 'application/json'};
-    headers[TOKEN_HEADER] = String(token || '');
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), GENERATE_TIMEOUT_MS);
@@ -473,8 +424,6 @@
     REOPEN_OPTIONS_KEY: REOPEN_OPTIONS_KEY,
     REOPEN_OPTIONS_TTL_MS: REOPEN_OPTIONS_TTL_MS,
     LOOKUP_CLIENT: LOOKUP_CLIENT,
-    TOKEN_HEADER: TOKEN_HEADER,
-    TOKEN_PARAM: TOKEN_PARAM,
     LOOKUP_UNREACHABLE: LOOKUP_UNREACHABLE,
     lookupErrorMessage: lookupErrorMessage,
     GENERATE_TIMEOUT_MS: GENERATE_TIMEOUT_MS,
@@ -486,7 +435,6 @@
     ankiConnect: ankiConnect,
     buildLookupUrl: buildLookupUrl,
     buildGenerateUrl: buildGenerateUrl,
-    readTokenFromSearch: readTokenFromSearch,
     generateErrorMessage: generateErrorMessage,
     requestGenerate: requestGenerate,
   };
