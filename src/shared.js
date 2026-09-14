@@ -21,9 +21,6 @@
     lookupEnabled: true, // Show the magnifier next to the "+".
     // Shared secret for the add-on's WRITE endpoint (/generate). Reading is unauthenticated;
     // regenerating spends the user's LLM credits, so it is not. Typed on the options page, or
-    // handed over by Omnia as ?omnia-token=… when it opens Settings. Stored LOCALLY, unlike
-    // every other setting here — see LOCAL_KEYS.
-    lookupToken: '',
     apiKey: '', // AnkiConnect "apiKey" option; empty when AnkiConnect apiKey is null.
     enabled: true, // Master on/off. When false, no "+" and no context-menu action.
     mouseEnabled: true, // Double-click "+" tooltip on/off (the right-click menu is unaffected).
@@ -52,7 +49,7 @@
   // the account, where it cannot even work — the Omnia over there issued a different one. So the
   // split is not tidiness; it is the difference between a machine-local secret staying local
   // and being replicated to places that have no use for it.
-  const LOCAL_KEYS = ['lookupToken'];
+  const LOCAL_KEYS = [];
 
   /**
    * Whether a settings key belongs in chrome.storage.local.
@@ -222,10 +219,6 @@
   const LOOKUP_CLIENT = 'web_clipper';
   const GENERATE_PATH = '/generate';
   const LOOKUP_PATH = '/lookup';
-  const TOKEN_HEADER = 'X-Omnia-Token';
-  // How Omnia hands the token to this extension: it opens the options page with the token in
-  // the query string (the same route the Reload handshake uses), so nobody has to copy it.
-  const TOKEN_PARAM = 'omnia-token';
 
   const LOOKUP_UNREACHABLE =
     "Can't reach Anki's lookup service. Make sure Anki is running with Omnia's " +
@@ -314,18 +307,6 @@
     return normaliseBase(baseUrl) + GENERATE_PATH;
   }
 
-  /**
-   * Read the token Omnia may have put in the options page's query string.
-   * @param {string} search The location.search to parse.
-   * @return {string} The token, or '' when there is none.
-   */
-  function readTokenFromSearch(search) {
-    try {
-      return (new URLSearchParams(search || '').get(TOKEN_PARAM) || '').trim();
-    } catch (_e) {
-      return ''; // no URLSearchParams / no location: nothing was handed over
-    }
-  }
 
   /**
    * Turn a /generate HTTP failure into a sentence naming the remedy.
@@ -380,14 +361,13 @@
    * @param {?Array<string>=} fields Which fields, or null/undefined for every field.
    * @return {!Promise<!Object>} `{note_id, results: [{field, status, message, ...}]}`.
    */
-  async function requestGenerate(baseUrl, token, noteId, fields) {
+  async function requestGenerate(baseUrl, noteId, fields) {
     const body = {
       client: LOOKUP_CLIENT,
       note_id: Number(noteId),
       fields: Array.isArray(fields) && fields.length ? fields : null,
     };
     const headers = {'Content-Type': 'application/json'};
-    headers[TOKEN_HEADER] = String(token || '');
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), GENERATE_TIMEOUT_MS);
@@ -473,8 +453,6 @@
     REOPEN_OPTIONS_KEY: REOPEN_OPTIONS_KEY,
     REOPEN_OPTIONS_TTL_MS: REOPEN_OPTIONS_TTL_MS,
     LOOKUP_CLIENT: LOOKUP_CLIENT,
-    TOKEN_HEADER: TOKEN_HEADER,
-    TOKEN_PARAM: TOKEN_PARAM,
     LOOKUP_UNREACHABLE: LOOKUP_UNREACHABLE,
     lookupErrorMessage: lookupErrorMessage,
     GENERATE_TIMEOUT_MS: GENERATE_TIMEOUT_MS,
@@ -486,7 +464,6 @@
     ankiConnect: ankiConnect,
     buildLookupUrl: buildLookupUrl,
     buildGenerateUrl: buildGenerateUrl,
-    readTokenFromSearch: readTokenFromSearch,
     generateErrorMessage: generateErrorMessage,
     requestGenerate: requestGenerate,
   };

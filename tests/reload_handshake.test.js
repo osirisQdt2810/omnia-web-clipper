@@ -329,45 +329,8 @@ const tests = {
     );
   },
 
-  'options: a token in the URL is stored and then wiped from the address bar': async function () {
-    const result = runOptions('?omnia-token=abc123');
-    await settle();
-    const patch = result.saved.filter(function (p) {
-      return Object.prototype.hasOwnProperty.call(p, 'lookupToken');
-    })[0];
-    assert.ok(patch, 'Omnia handed the token over and the page did not keep it');
-    assert.strictEqual(patch.lookupToken, 'abc123');
-    assert.ok(
-      result.chrome.calls.includes('history.replaceState'),
-      'a shared secret must not sit in the address bar, or in the tab history behind it'
-    );
-    assert.ok(!result.chrome.calls.includes('runtime.reload'), 'a token alone is not a reload');
-  },
 
-  'options: a token that arrives WITH a reload is stored BEFORE the reload': async function () {
-    const result = runOptions('?omnia-reload=1&omnia-token=abc123');
-    await settle();
-    const stored = result.chrome.calls.indexOf('saveSettings');
-    const reloaded = result.chrome.calls.indexOf('runtime.reload');
-    assert.ok(stored !== -1, 'the token was dropped when the same URL also asked for a reload');
-    assert.ok(
-      reloaded !== -1 && stored < reloaded,
-      'chrome.runtime.reload() destroys this page: a write still in flight is lost, and the ' +
-        'user is left to copy the token by hand from Anki'
-    );
-    assert.strictEqual(result.saved[0].lookupToken, 'abc123');
-  },
 
-  'options: an ordinary open never overwrites the stored token': async function () {
-    const result = runOptions('');
-    await settle();
-    assert.ok(
-      result.saved.every(function (p) {
-        return !Object.prototype.hasOwnProperty.call(p, 'lookupToken');
-      }),
-      'opening Settings must not blank a token the user already has'
-    );
-  },
 
   'the two halves share ONE key definition': function () {
     const shared = sharedExports();

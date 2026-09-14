@@ -343,9 +343,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       try {
         const settings = await loadSettings();
         const base = settings.lookupUrl || 'http://127.0.0.1:8766';
-        const result = await requestGenerate(
-          base, settings.lookupToken || '', message.noteId, message.fields,
-        );
+        const result = await requestGenerate(base, message.noteId, message.fields);
         sendResponse({ok: true, result: result});
       } catch (err) {
         sendResponse({ok: false, error: err && err.message ? err.message : String(err)});
