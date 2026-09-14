@@ -454,11 +454,21 @@ async function openCorrect(page) {
   pill.children[2].fire('mousedown');
 }
 
-/** The unanswered /check request for `text` — `pending` only ever offers the oldest. */
-function checkFor(chrome, text) {
+/**
+ * The unanswered /check request for `text` (and `mode`, when two are in flight for one phrase).
+ *
+ * `pending` only ever offers the OLDEST unanswered request, which is precisely the wrong one
+ * whenever the point of the test is that an older request is still outstanding.
+ */
+function checkFor(chrome, text, mode) {
   return (
     chrome.sent.filter(function (entry) {
-      return !entry.answered && entry.message.type === 'omnia-check' && entry.message.text === text;
+      return (
+        !entry.answered &&
+        entry.message.type === 'omnia-check' &&
+        entry.message.text === text &&
+        (mode === undefined || entry.message.mode === mode)
+      );
     })[0] || null
   );
 }
@@ -1035,6 +1045,88 @@ const tests = {
     assert.strictEqual(second.message.mode, 'written');
   },
 
+  'a slow answer cannot revert a panel the user has since switched': async () => {
+    // Two requests for the SAME phrase, which is what the register toggle makes. The phrase
+    // guard passes for both, so without a per-request ticket the slow first answer lands
+    // twenty seconds late, overwrites the second, and flips the toggle back under the reader.
+    const page = loadContentScript();
+    await openCorrect(page);
+    const slow = checkFor(page.chrome, 'run', '');     // request A, mode '' -- still in flight
+
+    pressCorrect(page, 'data-mode', 'spoken');         // request B, same phrase
+    await settle();
+    answer(page.chrome, checkFor(page.chrome, 'run', 'spoken'), {
+      ok: true,
+      result: Object.assign(correctionPayload('spoken'), {
+        rewritten: 'SPOKEN ANSWER', highlight: [['SPOKEN ANSWER', false]],
+      }),
+    });
+    await settle();
+    assert.ok(correctPanel(page).innerHTML.indexOf('SPOKEN ANSWER') !== -1, 'B never landed');
+
+    answer(page.chrome, slow, {
+      ok: true,
+      result: Object.assign(correctionPayload('written'), {
+        rewritten: 'WRITTEN ANSWER', highlight: [['WRITTEN ANSWER', false]],
+      }),
+    });
+    await settle();
+
+    const html = correctPanel(page).innerHTML;
+    assert.ok(html.indexOf('WRITTEN ANSWER') === -1, 'the abandoned answer took the panel back');
+    assert.ok(html.indexOf('SPOKEN ANSWER') !== -1, 'it lost the answer the user was reading');
+    assert.ok(
+      /omnia-correct-mode-on" data-mode="spoken"/.test(html),
+      'the toggle flipped back to the register the user had left'
+    );
+  },
+
+  'a late FAILURE cannot overwrite the answer on screen either': async () => {
+    // The same trap on the error path: an abandoned request that times out would replace a
+    // perfectly good correction with a red message about a request nobody is waiting for.
+    const page = loadContentScript();
+    await openCorrect(page);
+    const slow = checkFor(page.chrome, 'run', '');
+
+    pressCorrect(page, 'data-mode', 'spoken');
+    await settle();
+    answer(page.chrome, checkFor(page.chrome, 'run', 'spoken'), {
+      ok: true, result: correctionPayload('spoken'),
+    });
+    await settle();
+
+    answer(page.chrome, slow, {ok: false, error: 'Omnia did not finish checking that phrase'});
+    await settle();
+
+    assert.ok(
+      !/<p class="omnia-correct-error">/.test(correctPanel(page).innerHTML),
+      'a failure from an abandoned request wiped the answer on screen'
+    );
+  },
+
+  'opening an explanation keeps the scroll and settles the animation': async () => {
+    // The panel scrolls, and every redraw rebuilds the subtree. Without this, pressing Why? on
+    // a fix far down the list throws the reader back to the top of a list that just flashed.
+    const page = loadContentScript();
+    await openCorrect(page);
+    answer(page.chrome, pending(page.chrome, 'omnia-check'), {
+      ok: true, result: correctionPayload(),
+    });
+    await settle();
+    assert.ok(
+      !/class="omnia-panel correct settled"/.test(correctPanel(page).innerHTML),
+      'a fresh answer came up pre-settled, so its cards never animated in'
+    );
+
+    pressCorrect(page, 'data-why', '0');
+    await settle();
+
+    assert.ok(
+      /class="omnia-panel correct settled"/.test(correctPanel(page).innerHTML),
+      'opening an explanation replayed the entry animation over what was being read'
+    );
+  },
+
   'a correction that arrives after the panel is dismissed does not resurrect it': async () => {
     // The same trap the lookup panel has, and worse: ensurePanelHost would BUILD a host at
     // wherever the pointer has since moved, putting a panel back that the user closed.
@@ -1128,6 +1220,27 @@ const tests = {
     assert.strictEqual(
       page.document.getElementById(CORRECT_PANEL_ID), null,
       'the correction outlived the selection it was about'
+    );
+  },
+
+  'the pill stays on screen at the right edge, whatever it carries': async () => {
+    // The clamp was tuned for two buttons. A third put 14 of its 22px past the edge, where a
+    // fixed element is clipped rather than scrollable-to -- and the right-hand column is a
+    // common place to be selecting text.
+    const page = loadContentScript();
+    page.window.innerWidth = 400;
+
+    page.document.fire('mouseup', {clientX: 399, clientY: 60, target: page.document.body});
+    await settle();
+
+    const pill = page.document.getElementById(TOOLTIP_ID);
+    assert.ok(pill, 'no pill appeared');
+    const left = parseInt(pill.style.left, 10);
+    const width = 22 * pill.children.length + 4 * (pill.children.length - 1);
+    assert.ok(
+      left + width <= page.window.innerWidth,
+      'the pill runs ' + (left + width - page.window.innerWidth) + 'px off the right edge ' +
+        '(left ' + left + ', ' + pill.children.length + ' buttons)'
     );
   },
 

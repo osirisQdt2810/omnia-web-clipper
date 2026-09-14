@@ -425,19 +425,6 @@
   }
 
   /**
-   * Read the token Omnia may have put in the options page's query string.
-   * @param {string} search The location.search to parse.
-   * @return {string} The token, or '' when there is none.
-   */
-  function readTokenFromSearch(search) {
-    try {
-      return (new URLSearchParams(search || '').get(TOKEN_PARAM) || '').trim();
-    } catch (_e) {
-      return ''; // no URLSearchParams / no location: nothing was handed over
-    }
-  }
-
-  /**
    * Turn a /generate HTTP failure into a sentence naming the remedy.
    *
    * A status code on its own is not actionable, and these two in particular have a specific

@@ -43,6 +43,11 @@
   // The desktop clipper puts its pill down-right of the POINTER, which reads better than
   // hanging it off the selection's top-right corner; the two clippers now match.
   const CURSOR_OFFSET = 12;
+  // The pill's geometry, in one place: makeCircleButton draws each button at this size and the
+  // pill's flex gap matches, so the right-edge clamp can be computed rather than guessed.
+  const PILL_BUTTON_PX = 22;
+  const PILL_GAP_PX = 4;
+  const PILL_MARGIN_PX = 8;
   let lastPointer = {x: 0, y: 0};
   // The magnifier glyph, drawn inline so the button needs no packaged asset.
   // Panel styling lives in the shadow root, so the host page's CSS cannot reach it. Mirrors the
@@ -275,6 +280,9 @@
       .omnia-correct-after, .omnia-correct-good { color: #5fd39b; }
       .omnia-correct-new { background: rgba(31,157,99,0.28); }
     }
+    /* A redraw of an answer already on screen. The entry animation is an introduction; played
+       again every time an explanation opens, it is a flash over the thing being read. */
+    .omnia-panel.settled .omnia-correct-fix { animation: none; }
     /* Someone who asked the OS for less motion is not asking for a tasteful exception. */
     @media (prefers-reduced-motion: reduce) {
       .omnia-correct-fix, .omnia-correct-why { animation: none; }
@@ -325,6 +333,12 @@
   // has no per-note bookkeeping to keep straight, just which explanations are showing. The
   // markup it turns into is built by correct_view.js, which is where the testable part is.
   let correctState = null;
+
+  // Which /check request the panel is waiting for. The phrase alone cannot say: the register
+  // toggle re-asks with the SAME text, so two answers for one phrase can be in flight at once
+  // and the slow one may land twenty seconds after the user moved on -- silently reverting the
+  // panel and flipping the toggle back under them. A number that only ever goes up settles it.
+  let correctRequest = 0;
 
   // Cached enable flags so the (frequent) selection handler stays synchronous.
   // Seeded from storage on load and kept fresh via chrome.storage.onChanged.
@@ -696,11 +710,11 @@
     Object.assign(pill.style, {
       position: 'fixed',
       // Down-right of the pointer, clamped to the viewport — the desktop clipper's placement.
+      // `left` is set once the buttons are on, since the clamp depends on how many there are.
       top: Math.min(window.innerHeight - 30, lastPointer.y + CURSOR_OFFSET) + 'px',
-      left: Math.min(window.innerWidth - 60, lastPointer.x + CURSOR_OFFSET) + 'px',
       zIndex: '2147483647',
       display: 'flex',
-      gap: '4px',
+      gap: PILL_GAP_PX + 'px',
       padding: '0',
       background: 'transparent',
       userSelect: 'none',
@@ -742,12 +756,30 @@
       pill.appendChild(fix);
     }
 
+    pill.style.left = clampPillLeft(pill.children.length) + 'px';
     document.body.appendChild(pill);
     if (lookupButton) {
       // Only now that the pill is IN the document: the probe's guard checks isConnected, and a
       // fast reply would otherwise arrive while the button is still detached and be dropped.
       probeLookup(capture.selection || '', lookupButton);
     }
+  }
+
+  /**
+   * Where the pill may start, so all of it stays on screen.
+   *
+   * Derived from the buttons actually on it rather than hard-coded. The old constant was tuned
+   * for two; a third pushed 14 of the last button's 22px past the right edge, where it is
+   * clipped rather than scrollable-to -- and a right-hand column is a common place to be
+   * selecting text. A fourth button would have done it again.
+   *
+   * @param {number} count How many buttons the pill carries.
+   * @return {number} The clamped left offset, in pixels.
+   */
+  function clampPillLeft(count) {
+    const width = PILL_BUTTON_PX * count + PILL_GAP_PX * Math.max(0, count - 1);
+    return Math.max(0, Math.min(window.innerWidth - width - PILL_MARGIN_PX,
+      lastPointer.x + CURSOR_OFFSET));
   }
 
   /**
@@ -763,8 +795,8 @@
     el.title = title;
     el.textContent = label;
     Object.assign(el.style, {
-      width: '22px',
-      height: '22px',
+      width: PILL_BUTTON_PX + 'px',
+      height: PILL_BUTTON_PX + 'px',
       lineHeight: '20px',
       textAlign: 'center',
       fontSize: '14px',
@@ -1020,11 +1052,24 @@
    *
    * @param {string} inner The panel's inner HTML, from correct_view.js.
    */
-  function showCorrectPanel(inner) {
+  function showCorrectPanel(inner, settled) {
     const root = ensurePanelHost(CORRECT_PANEL_ID, 'Omnia correction', 402);
+    // The panel scrolls (it inherits .omnia-panel's max-height), and every redraw rebuilds the
+    // subtree. Without this, pressing Why? on the fifth of six fixes throws you back to the top
+    // of a list that just re-animated, with the explanation you asked for now off screen.
+    // `settled` marks a redraw of content already on screen: keep the scroll, and suppress the
+    // entry animation, which is an introduction and not something to repeat.
+    const previous = root.querySelector('.omnia-panel');
+    const scrollTop = settled && previous ? previous.scrollTop : 0;
     root.innerHTML =
       `<style>${PANEL_CSS}${CORRECT_CSS}</style>` +
-      `<div class="omnia-panel correct">${inner}</div>`;
+      `<div class="omnia-panel correct${settled ? ' settled' : ''}">${inner}</div>`;
+    if (scrollTop) {
+      const panel = root.querySelector('.omnia-panel');
+      if (panel) {
+        panel.scrollTop = scrollTop;
+      }
+    }
     root.querySelectorAll('[data-why]').forEach((el) => {
       el.addEventListener('click', () => toggleWhy(Number(el.dataset.why)));
     });
@@ -1036,21 +1081,27 @@
     });
   }
 
-  /** Redraw the correction panel from the state in hand. A closed panel is left closed. */
-  function rerenderCorrect() {
+  /**
+   * Redraw the correction panel from the state in hand. A closed panel is left closed.
+   *
+   * @param {boolean=} settled Whether this is the SAME answer being redrawn (an explanation
+   *     opening or closing), where the scroll position and the settled animations are part of
+   *     what the user is looking at. False when the content changes underneath.
+   */
+  function rerenderCorrect(settled) {
     if (!correctPanelIsOpen() || !correctState) {
       return;
     }
     if (correctState.error) {
-      showCorrectPanel(CorrectView.failed(correctState.error, correctState.mode));
+      showCorrectPanel(CorrectView.failed(correctState.error, correctState.mode), false);
       return;
     }
     if (!correctState.correction) {
-      showCorrectPanel(CorrectView.pending(correctState.mode));
+      showCorrectPanel(CorrectView.pending(correctState.mode), false);
       return;
     }
     showCorrectPanel(
-      CorrectView.render(correctState.correction, {open: correctState.open})
+      CorrectView.render(correctState.correction, {open: correctState.open}), !!settled
     );
   }
 
@@ -1072,7 +1123,7 @@
     } else {
       correctState.open.splice(at, 1);
     }
-    rerenderCorrect();
+    rerenderCorrect(true);  // the same answer, one paragraph wider
   }
 
   /**
@@ -1164,8 +1215,9 @@
     // decides, and until it answers there is nothing truthful to light up, so the toggle shows
     // its default and is corrected by the answer.
     const asked = CorrectView.MODES.indexOf(mode) === -1 ? '' : mode;
+    const ticket = ++correctRequest;
     correctState = {text: phrase, mode: asked || 'written', correction: null, open: [], error: ''};
-    showCorrectPanel(CorrectView.pending(correctState.mode));
+    showCorrectPanel(CorrectView.pending(correctState.mode), false);
     try {
       chrome.runtime.sendMessage(
         {type: 'omnia-check', text: phrase, mode: asked, refresh: !!refresh},
@@ -1177,7 +1229,11 @@
           // The panel this answer belongs to may be gone -- Escape, or a click outside it,
           // while the check was in flight. Drawing now would BUILD one at wherever the pointer
           // has since moved, resurrecting something the user dismissed.
-          if (!correctPanelIsOpen() || !correctState || correctState.text !== phrase) {
+          //
+          // The ticket covers what the phrase cannot: a second request for the SAME phrase in
+          // the other register. Not the mode either, since the answer's own mode is adopted
+          // below -- only "is this still the request the panel is waiting for" is the question.
+          if (!correctPanelIsOpen() || !correctState || ticket !== correctRequest) {
             return;
           }
           if (failure || !response || !response.ok) {

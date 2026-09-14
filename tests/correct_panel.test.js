@@ -230,6 +230,34 @@ const tests = {
     assert.strictEqual(view.copyText(null), '');
   },
 
+  'an answer with nothing to copy offers no button, and no empty box': () => {
+    // `already_good` with no rewrite is plausible: nothing was rewritten. An empty "Corrected"
+    // box above a Copy button that does nothing and says nothing is worse than no box.
+    const payload = {already_good: true, changed: false, fixes: [], mode: 'written'};
+    const html = view.render(payload, {open: []});
+    assert.ok(!html.includes('data-copy'), 'a Copy button with nothing to copy');
+    assert.ok(!html.includes('omnia-correct-final"'), 'an empty Corrected box');
+    assert.ok(/nothing to change/i.test(text(html)), 'and it stopped saying anything at all');
+  },
+
+  'runs without a rewrite are still readable, and still offer nothing to copy': () => {
+    // The case the empty-box guard does NOT cover: there is a sentence to show (the runs), but
+    // `copyText` reads `rewritten`, so a Copy button here would be one that does nothing.
+    const html = view.render(
+      {highlight: [['I went.', true]], fixes: [], mode: 'written'}, {open: []}
+    );
+    assert.ok(text(html).includes('I went.'), 'it hid a sentence it could perfectly well show');
+    assert.ok(!html.includes('data-copy'), 'a Copy button with nothing behind it');
+  },
+
+  'a rewrite with no fixes still gets its box and its button': () => {
+    const html = view.render(
+      {rewritten: 'I went.', highlight: [['I went.', false]], fixes: [], mode: 'written'},
+      {open: []}
+    );
+    assert.ok(html.includes('data-copy'), 'there was something to copy and no button for it');
+  },
+
   // -- the states before an answer --------------------------------------------------------
   'the pending panel still offers the toggle, so the wait can be redirected': () => {
     const html = view.pending('spoken');

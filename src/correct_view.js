@@ -97,6 +97,8 @@
   function runsOf(correction) {
     const runs = (correction && correction.highlight) || [];
     if (!Array.isArray(runs) || !runs.length) {
+      // With no rewrite either, this is [['', false]] -- one empty run, which finalBlock reads
+      // as "there is nothing here" rather than as a sentence.
       return [[(correction && correction.rewritten) || '', false]];
     }
     return runs.filter((run) => Array.isArray(run) && run.length >= 1);
@@ -208,6 +210,12 @@
    * @return {string}
    */
   function finalBlock(correction, marked) {
+    // Nothing to show. An `already_good` answer may legitimately omit the rewrite -- nothing was
+    // rewritten -- and an empty "Corrected" box above a Copy button that does nothing and says
+    // nothing is worse than no box at all.
+    if (!copyText(correction) && !runsOf(correction).some((run) => run[0])) {
+      return '';
+    }
     const body = runsOf(correction)
       .map((run) =>
         marked && run[1]
@@ -215,11 +223,17 @@
           : escape(run[0])
       )
       .join('');
+    // The button only when there is something for it to put on the clipboard. `copyText` hands
+    // over `rewritten`, so a payload with runs but no rewrite can still be READ and simply has
+    // nothing to copy.
+    const copy = copyText(correction)
+      ? '<button type="button" class="omnia-correct-copy" data-copy="1">Copy</button>'
+      : '';
     return (
       '<div class="omnia-correct-final">' +
         '<div class="omnia-correct-final-head">' +
           '<span class="omnia-correct-final-label">Corrected</span>' +
-          '<button type="button" class="omnia-correct-copy" data-copy="1">Copy</button>' +
+          copy +
         '</div>' +
         '<p class="omnia-correct-text">' + body + '</p>' +
       '</div>'
