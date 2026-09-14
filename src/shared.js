@@ -193,6 +193,7 @@
   const LOOKUP_CLIENT = 'web_clipper';
   const GENERATE_PATH = '/generate';
   const LOOKUP_PATH = '/lookup';
+  const CHECK_PATH = '/check';
 
   const LOOKUP_UNREACHABLE =
     "Can't reach Anki's lookup service. Make sure Anki is running with Omnia's " +
@@ -279,6 +280,148 @@
    */
   function buildGenerateUrl(baseUrl) {
     return normaliseBase(baseUrl) + GENERATE_PATH;
+  }
+
+  /**
+   * The URL of the phrase-correction endpoint.
+   * @param {string} baseUrl Where the add-on's lookup service listens.
+   * @return {string} The full POST URL.
+   */
+  function buildCheckUrl(baseUrl) {
+    return normaliseBase(baseUrl) + CHECK_PATH;
+  }
+
+  // How long one /check may take. Much shorter than /generate's five minutes, and deliberately:
+  // this is ONE model call on a phrase the user has selected and is watching a spinner for,
+  // where /generate is several calls filling a whole note and may reasonably be left running.
+  // A minute and a half is past the point where anything is coming back, and waiting longer
+  // just leaves the panel lying about being busy.
+  const CHECK_TIMEOUT_MS = 90000;
+  const CHECK_TIMED_OUT =
+    'Omnia did not finish checking that phrase within 90 seconds. The model may be slow or ' +
+    'unreachable — try again, or pick a shorter phrase.';
+
+  /**
+   * Turn a /check HTTP failure into a sentence naming the remedy.
+   *
+   * The two that matter are told apart on purpose. 503 means Phrase Check is switched OFF —
+   * answered by a toggle in Anki. 502 means it ran and failed, and the add-on puts the
+   * provider's own words in the body, which is the difference between "check your key" and
+   * "you are out of credit". Flattening those into one sentence sends the user hunting through
+   * settings for a problem that was never there.
+   *
+   * @param {number} status The HTTP status.
+   * @param {?Object=} payload The parsed error body ({error: "..."}), when there was one.
+   * @return {string} What went wrong and what to do about it.
+   */
+  function checkErrorMessage(status, payload) {
+    const detail = payload && payload.error ? String(payload.error).trim() : '';
+    // What went wrong, when the add-on did not say. Omnia's own sentence is preferred whenever
+    // there is one: it is the accurate half, and for 502 it carries the provider's words.
+    const fallbacks = {
+      400: 'Omnia could not read the correction request (400).',
+      403:
+        'Omnia refused the request (403) because it did not come from this extension’s ' +
+        'background worker.',
+      // An Omnia that predates Phrase Check has no such endpoint, and sends no body to explain
+      // it. Not a setting — an update.
+      404: 'The Omnia running in Anki does not have Phrase Check.',
+      502: 'Omnia could not check that phrase.',
+      503: 'Phrase Check is switched off.',
+    };
+    // Where to go, which is what this side knows and the add-on does not. APPENDED rather than
+    // substituted: Omnia's 503 already says "turn it on", so a message that also said it would
+    // be the same instruction twice in different words, which reads as a bug.
+    const remedies = {
+      400: 'This is a bug in the clipper — please report it.',
+      403: 'Reload the extension (or the page) and try again.',
+      404: 'Update the add-on (Tools → Add-ons → Check for Updates), then try again.',
+      503: 'You will find it in Anki under Tools → Omnia.',
+    };
+    const said = detail || fallbacks[status] || 'Omnia answered ' + status + '.';
+    const remedy = remedies[status] || '';
+    if (!remedy || said.indexOf(remedy) !== -1) {
+      return said;
+    }
+    // Omnia's sentences do not always end in one, and two run together without a full stop read
+    // as a single mangled thought.
+    return (/[.!?…]$/.test(said) ? said : said + '.') + ' ' + remedy;
+  }
+
+  /**
+   * Ask Omnia to correct a phrase. Returns the parsed correction or throws an
+   * already-actionable Error.
+   *
+   * Made from the SERVICE WORKER, like /generate and for the same reason: the add-on refuses
+   * anything a web page could have initiated, because this side effect spends the user's LLM
+   * credits and a page must never be able to spend them.
+   *
+   * @param {string} baseUrl Where the add-on's lookup service listens.
+   * @param {string} text The selected phrase.
+   * @param {string=} mode 'written' or 'spoken'. Empty means "whatever Omnia is set to" — the
+   *     configured default lives in the add-on, and guessing here would override a setting.
+   * @param {boolean=} refresh True to ignore the remembered answer and ask again.
+   * @return {!Promise<!Object>} `{original, rewritten, mode, fixes, highlight, …}`.
+   */
+  async function requestCheck(baseUrl, text, mode, refresh) {
+    const body = {
+      text: String(text || ''),
+      mode: String(mode || ''),
+      refresh: Boolean(refresh),
+    };
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), CHECK_TIMEOUT_MS);
+    try {
+      return await sendCheck(buildCheckUrl(baseUrl), body, controller.signal);
+    } finally {
+      // Covers the body read as well as the fetch, so nothing leaves a timer armed behind a
+      // request that already finished.
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * POST one /check request and read its answer.
+   *
+   * Split out of {@link requestCheck} so the timeout is set up and torn down in exactly one
+   * place, whichever way this half exits.
+   *
+   * @param {string} url The /check URL.
+   * @param {!Object} body The request body (serialised here).
+   * @param {!AbortSignal} signal The timeout's signal.
+   * @return {!Promise<!Object>} The parsed correction.
+   */
+  async function sendCheck(url, body, signal) {
+    let response;
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body),
+        signal: signal,
+      });
+    } catch (err) {
+      throw new Error(err && err.name === 'AbortError' ? CHECK_TIMED_OUT : LOOKUP_UNREACHABLE);
+    }
+
+    if (!response.ok) {
+      let payload = null;
+      try {
+        payload = await response.json();
+      } catch (_e) {
+        payload = null; // an error body is a courtesy, not a guarantee
+      }
+      throw new Error(checkErrorMessage(response.status, payload));
+    }
+
+    try {
+      return await response.json();
+    } catch (err) {
+      if (err && err.name === 'AbortError') {
+        throw new Error(CHECK_TIMED_OUT);
+      }
+      throw new Error('Omnia returned a non-JSON answer to the correction request.');
+    }
   }
 
   /**
@@ -437,5 +580,10 @@
     buildGenerateUrl: buildGenerateUrl,
     generateErrorMessage: generateErrorMessage,
     requestGenerate: requestGenerate,
+    CHECK_TIMEOUT_MS: CHECK_TIMEOUT_MS,
+    CHECK_TIMED_OUT: CHECK_TIMED_OUT,
+    buildCheckUrl: buildCheckUrl,
+    checkErrorMessage: checkErrorMessage,
+    requestCheck: requestCheck,
   };
 })(typeof self !== 'undefined' ? self : this);

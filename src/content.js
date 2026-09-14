@@ -39,9 +39,15 @@
 
   const TOOLTIP_ID = 'omnia-clipper-tooltip';
   const PANEL_ID = 'omnia-clipper-lookup-panel';
+  const CORRECT_PANEL_ID = 'omnia-clipper-correct-panel';
   // The desktop clipper puts its pill down-right of the POINTER, which reads better than
   // hanging it off the selection's top-right corner; the two clippers now match.
   const CURSOR_OFFSET = 12;
+  // The pill's geometry, in one place: makeCircleButton draws each button at this size and the
+  // pill's flex gap matches, so the right-edge clamp can be computed rather than guessed.
+  const PILL_BUTTON_PX = 22;
+  const PILL_GAP_PX = 4;
+  const PILL_MARGIN_PX = 8;
   let lastPointer = {x: 0, y: 0};
   // The magnifier glyph, drawn inline so the button needs no packaged asset.
   // Panel styling lives in the shadow root, so the host page's CSS cannot reach it. Mirrors the
@@ -149,20 +155,166 @@
     }
   `;
 
+  // The correction panel's own styles, layered ON TOP of PANEL_CSS so the shell, the dark-mode
+  // block and the spinner are shared rather than copied. Green throughout, against the lookup
+  // panel's blue: the two open from the same pill over the same selection, and a glance has to
+  // be enough to tell which one is on screen.
+  const CORRECT_CSS = `
+    .omnia-panel.correct { width: 400px; }
+    .omnia-correct-head {
+      display: flex; align-items: center; gap: 8px;
+      background: linear-gradient(135deg, rgba(31,157,99,0.12), rgba(0,0,0,0));
+      border: 1px solid rgba(31,157,99,0.24); border-radius: 10px;
+      padding: 9px 11px; margin-bottom: 10px;
+    }
+    .omnia-correct-title { flex: 1; font-size: 15px; font-weight: 600; }
+    .omnia-correct-modes { display: flex; gap: 3px; }
+    .omnia-correct-mode {
+      font: inherit; font-size: 11px; cursor: pointer;
+      background: transparent; color: #6b727c;
+      border: 1px solid #dfe3e8; border-radius: 7px; padding: 3px 9px;
+      transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+    }
+    .omnia-correct-mode:hover { border-color: #1f9d63; color: #1f9d63; }
+    .omnia-correct-mode-on {
+      background: #1f9d63; border-color: #1f9d63; color: #ffffff;
+      font-weight: 600; cursor: default;
+    }
+    .omnia-correct-fixes { list-style: none; margin: 0; padding: 0;
+      display: flex; flex-direction: column; gap: 8px; }
+    .omnia-correct-fix {
+      background: rgba(246,247,249,0.75);
+      border: 1px solid #dfe3e8; border-left: 3px solid rgba(31,157,99,0.45);
+      border-radius: 8px; padding: 9px 11px 10px;
+      /* Staggered, so the eye is walked down the list in the order it should be read rather
+         than meeting six cards at once. Capped below: past a handful this stops being a
+         flourish and becomes a wait. */
+      animation: omnia-rise 0.26s ease both;
+    }
+    .omnia-correct-fix:nth-child(2) { animation-delay: 0.05s; }
+    .omnia-correct-fix:nth-child(3) { animation-delay: 0.10s; }
+    .omnia-correct-fix:nth-child(4) { animation-delay: 0.15s; }
+    .omnia-correct-fix:nth-child(n+5) { animation-delay: 0.20s; }
+    @keyframes omnia-rise {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: none; }
+    }
+    .omnia-correct-change {
+      display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px; font-size: 13px;
+    }
+    .omnia-correct-before {
+      color: #b4342b; text-decoration: line-through;
+      text-decoration-color: rgba(180,52,43,0.5);
+    }
+    .omnia-correct-arrow { color: #9aa1ac; font-size: 11px; }
+    .omnia-correct-after { color: #147a4b; font-weight: 600; }
+    .omnia-correct-gone { color: #9aa1ac; font-style: italic; }
+    .omnia-correct-meta {
+      display: flex; align-items: center; gap: 8px; margin-top: 7px;
+    }
+    .omnia-correct-kind {
+      flex: 1; font-size: 10px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.4px; color: #6b727c;
+    }
+    .omnia-correct-why-btn {
+      font: inherit; font-size: 11px; cursor: pointer;
+      background: transparent; color: #6b727c;
+      border: 1px solid #dfe3e8; border-radius: 7px; padding: 2px 9px;
+      transition: color 0.15s ease, border-color 0.15s ease;
+    }
+    .omnia-correct-why-btn:hover { border-color: #1f9d63; color: #1f9d63; }
+    .omnia-correct-why {
+      margin: 8px 0 0; font-size: 12px; line-height: 1.5; color: #4a515b;
+      border-top: 1px dashed #dfe3e8; padding-top: 7px;
+      animation: omnia-unfold 0.2s ease both;
+    }
+    @keyframes omnia-unfold {
+      from { opacity: 0; transform: translateY(-3px); }
+      to { opacity: 1; transform: none; }
+    }
+    .omnia-correct-good {
+      margin: 0 0 10px; font-size: 13px; color: #147a4b;
+      background: rgba(31,157,99,0.08); border-radius: 8px; padding: 9px 11px;
+    }
+    .omnia-correct-final {
+      margin-top: 12px; border-top: 1px solid #dfe3e8; padding-top: 10px;
+    }
+    .omnia-correct-final-head {
+      display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
+    }
+    .omnia-correct-final-label {
+      flex: 1; font-size: 11px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.4px; color: #6b727c;
+    }
+    .omnia-correct-copy {
+      font: inherit; font-size: 11px; cursor: pointer;
+      background: transparent; color: #6b727c;
+      border: 1px solid #dfe3e8; border-radius: 7px; padding: 2px 9px;
+      transition: color 0.15s ease, border-color 0.15s ease;
+    }
+    .omnia-correct-copy:hover { border-color: #1f9d63; color: #1f9d63; }
+    .omnia-correct-copy.done { border-color: #1f9d63; color: #1f9d63; font-weight: 600; }
+    .omnia-correct-text { margin: 0; font-size: 14px; line-height: 1.6; }
+    /* The changed words. A background rather than only bold: bold alone is invisible in a
+       sentence that already has some, and this has to survive being skim-read. */
+    .omnia-correct-new {
+      background: rgba(31,157,99,0.16); color: inherit;
+      font-weight: 700; border-radius: 3px; padding: 0 2px;
+    }
+    .omnia-correct-pending, .omnia-correct-error { margin: 0; font-size: 13px; }
+    .omnia-correct-pending { color: #6b727c; }
+    .omnia-correct-pending::after {
+      content: ''; display: inline-block; width: 9px; height: 9px; margin-left: 7px;
+      box-sizing: border-box; vertical-align: baseline;
+      border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+      animation: omnia-spin 0.7s linear infinite;
+    }
+    .omnia-correct-error { color: #a35b00; line-height: 1.5; }
+    @media (prefers-color-scheme: dark) {
+      .omnia-correct-fix { background: rgba(38,42,49,0.75); border-color: #363b44; }
+      .omnia-correct-mode, .omnia-correct-why-btn, .omnia-correct-copy { border-color: #363b44; }
+      .omnia-correct-mode-on { color: #ffffff; border-color: #1f9d63; }
+      .omnia-correct-why { color: #b9bfc8; border-top-color: #363b44; }
+      .omnia-correct-final { border-top-color: #363b44; }
+      .omnia-correct-before { color: #e0736a; }
+      .omnia-correct-after, .omnia-correct-good { color: #5fd39b; }
+      .omnia-correct-new { background: rgba(31,157,99,0.28); }
+    }
+    /* A redraw of an answer already on screen. The entry animation is an introduction; played
+       again every time an explanation opens, it is a flash over the thing being read. */
+    .omnia-panel.settled .omnia-correct-fix { animation: none; }
+    /* Someone who asked the OS for less motion is not asking for a tasteful exception. */
+    @media (prefers-reduced-motion: reduce) {
+      .omnia-correct-fix, .omnia-correct-why { animation: none; }
+    }
+  `;
+
   const LOOKUP_SVG =
     '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" ' +
     'stroke="#ffffff" stroke-width="2.4" stroke-linecap="round">' +
     '<circle cx="10.5" cy="10.5" r="6.5"></circle>' +
     '<line x1="15.5" y1="15.5" x2="21" y2="21"></line></svg>';
+  // A wand with sparkles: "make this better", which is what the button does. A tick would read
+  // as "this is correct", the opposite of why anyone presses it.
+  const CORRECT_SVG =
+    '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" ' +
+    'stroke="#ffffff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="M3 21 L13.5 10.5"></path><path d="M15.5 4V2"></path><path d="M15.5 14v-2"></path>' +
+    '<path d="M19.5 8h2"></path><path d="M9.5 8h2"></path>' +
+    '<path d="M18.3 11.3l1 1"></path><path d="M18.3 4.7l1-1"></path></svg>';
   const TOAST_ID = 'omnia-clipper-toast';
   // Cap the context snippet so we never ship a whole article into a note field.
   const MAX_CONTEXT_CHARS = 600;
   const MAX_SENTENCE_CHARS = 400;
 
-  // The panel's view model lives in lookup_view.js, injected just before this file (see the
-  // manifest and background.js's re-injection list). Everything below is glue: DOM, events and
-  // messaging. Every decision about WHAT to draw is made over there, where it is testable.
+  // The panels' view models live in lookup_view.js and correct_view.js, injected just before
+  // this file (see the manifest and background.js's re-injection list). Everything below is
+  // glue: DOM, events and messaging. Every decision about WHAT to draw is made over there,
+  // where it is testable.
   const LookupView = self.OmniaLookupView;
+  // Same arrangement as LookupView: the markup and the panel's rules live in their own file,
+  // loaded as a content script before this one, so they are testable with plain Node.
+  const CorrectView = self.OmniaCorrectView;
 
   // The most recent capture payload, frozen at the moment the selection was made.
   // We snapshot here (not on click) because clicking the tooltip can clear the
@@ -174,6 +326,19 @@
   // by note id, what each matched note is generating and what Omnia said about it. All of that
   // lives in lookup_view.js, where it is testable; this file only drives it.
   let panelState = null;
+
+  // What the open CORRECTION panel is showing, or null when none is open:
+  //   {text, mode, correction, open: [fix index, ...], error}
+  // Small enough to live here rather than in a view-model class -- unlike the lookup panel it
+  // has no per-note bookkeeping to keep straight, just which explanations are showing. The
+  // markup it turns into is built by correct_view.js, which is where the testable part is.
+  let correctState = null;
+
+  // Which /check request the panel is waiting for. The phrase alone cannot say: the register
+  // toggle re-asks with the SAME text, so two answers for one phrase can be in flight at once
+  // and the slow one may land twenty seconds after the user moved on -- silently reverting the
+  // panel and flipping the toggle back under them. A number that only ever goes up settles it.
+  let correctRequest = 0;
 
   // Cached enable flags so the (frequent) selection handler stays synchronous.
   // Seeded from storage on load and kept fresh via chrome.storage.onChanged.
@@ -214,11 +379,11 @@
       audioContext = null;
     }
     removeTooltip();
-    // The panel goes too. It is not merely stale UI: ensurePanelHost ADOPTS an existing host by
-    // id, so a panel left behind by this dead instance would be inherited whole -- handlers,
+    // The panels go too. They are not merely stale UI: ensurePanelHost ADOPTS an existing host
+    // by id, so one left behind by this dead instance would be inherited whole -- handlers,
     // shadow root and all -- by the instance a re-injection starts, which then draws a live
     // answer into a node wired to a context that can no longer talk to Anki.
-    removePanel();
+    removePanels();
     document.removeEventListener('mouseup', onSelectionEvent, true);
     document.removeEventListener('dblclick', onSelectionEvent, true);
     document.removeEventListener('scroll', removeTooltip, true);
@@ -467,9 +632,9 @@
   }
 
   /**
-   * Whether ``node`` belongs to the clipper's own UI (the pill or the lookup panel).
+   * Whether ``node`` belongs to the clipper's own UI (the pill or either panel).
    *
-   * A click inside the panel is retargeted to its shadow HOST, so comparing against the host
+   * A click inside a panel is retargeted to its shadow HOST, so comparing against the host
    * covers the whole panel without piercing the shadow root.
    *
    * @param {?Node} node The event target.
@@ -477,11 +642,13 @@
    */
   function isOwnUi(node) {
     const tooltip = document.getElementById(TOOLTIP_ID);
-    const panel = document.getElementById(PANEL_ID);
     if (tooltip && (tooltip === node || tooltip.contains(node))) {
       return true;
     }
-    return !!panel && (panel === node || panel.contains(node));
+    return [PANEL_ID, CORRECT_PANEL_ID].some((id) => {
+      const panel = document.getElementById(id);
+      return !!panel && (panel === node || panel.contains(node));
+    });
   }
 
   /** Remove the lookup panel, if one is open, and forget what it was showing. */
@@ -493,9 +660,35 @@
     panelState = null;
   }
 
+  /** Remove the correction panel, if one is open, and forget what it was showing. */
+  function removeCorrectPanel() {
+    const existing = document.getElementById(CORRECT_PANEL_ID);
+    if (existing) {
+      existing.remove();
+    }
+    correctState = null;
+  }
+
+  /**
+   * Close whichever panel is open.
+   *
+   * The two are alternatives over the same selection, never both at once, so everything that
+   * means "dismiss the popover" -- Escape, an outside click, a fresh selection -- says this
+   * rather than naming one of them and leaving the other on screen.
+   */
+  function removePanels() {
+    removePanel();
+    removeCorrectPanel();
+  }
+
   /** @return {boolean} Whether a lookup panel is on screen right now. */
   function panelIsOpen() {
     return !!document.getElementById(PANEL_ID);
+  }
+
+  /** @return {boolean} Whether a correction panel is on screen right now. */
+  function correctPanelIsOpen() {
+    return !!document.getElementById(CORRECT_PANEL_ID);
   }
 
   /**
@@ -504,7 +697,7 @@
    */
   function showTooltip(capture) {
     removeTooltip();
-    removePanel();  // a new selection makes any open answer stale
+    removePanels();  // a new selection makes any open answer stale
     pendingCapture = capture;
 
     const selection = window.getSelection();
@@ -517,11 +710,11 @@
     Object.assign(pill.style, {
       position: 'fixed',
       // Down-right of the pointer, clamped to the viewport — the desktop clipper's placement.
+      // `left` is set once the buttons are on, since the clamp depends on how many there are.
       top: Math.min(window.innerHeight - 30, lastPointer.y + CURSOR_OFFSET) + 'px',
-      left: Math.min(window.innerWidth - 60, lastPointer.x + CURSOR_OFFSET) + 'px',
       zIndex: '2147483647',
       display: 'flex',
-      gap: '4px',
+      gap: PILL_GAP_PX + 'px',
       padding: '0',
       background: 'transparent',
       userSelect: 'none',
@@ -551,14 +744,42 @@
       arm(look, () => sendLookup(capture));
       pill.appendChild(look);
       lookupButton = look;
+
+      // Beside the magnifier, and gated on the same switch: both are the lookup service on the
+      // same socket, so if that is off there is nothing for either to talk to. Whether Phrase
+      // Check itself is on is the ADD-ON's to answer -- it says so in a sentence naming the
+      // toggle, which is more use than a button that quietly is not there.
+      const fix = makeCircleButton('', '#1f9d63', 'Check this phrase for mistakes (Omnia)');
+      fix.setAttribute('aria-label', 'Check this phrase with Omnia');
+      fix.innerHTML = CORRECT_SVG;
+      arm(fix, () => sendCorrect(capture.selection || '', '', false));
+      pill.appendChild(fix);
     }
 
+    pill.style.left = clampPillLeft(pill.children.length) + 'px';
     document.body.appendChild(pill);
     if (lookupButton) {
       // Only now that the pill is IN the document: the probe's guard checks isConnected, and a
       // fast reply would otherwise arrive while the button is still detached and be dropped.
       probeLookup(capture.selection || '', lookupButton);
     }
+  }
+
+  /**
+   * Where the pill may start, so all of it stays on screen.
+   *
+   * Derived from the buttons actually on it rather than hard-coded. The old constant was tuned
+   * for two; a third pushed 14 of the last button's 22px past the right edge, where it is
+   * clipped rather than scrollable-to -- and a right-hand column is a common place to be
+   * selecting text. A fourth button would have done it again.
+   *
+   * @param {number} count How many buttons the pill carries.
+   * @return {number} The clamped left offset, in pixels.
+   */
+  function clampPillLeft(count) {
+    const width = PILL_BUTTON_PX * count + PILL_GAP_PX * Math.max(0, count - 1);
+    return Math.max(0, Math.min(window.innerWidth - width - PILL_MARGIN_PX,
+      lastPointer.x + CURSOR_OFFSET));
   }
 
   /**
@@ -574,8 +795,8 @@
     el.title = title;
     el.textContent = label;
     Object.assign(el.style, {
-      width: '22px',
-      height: '22px',
+      width: PILL_BUTTON_PX + 'px',
+      height: PILL_BUTTON_PX + 'px',
       lineHeight: '20px',
       textAlign: 'center',
       fontSize: '14px',
@@ -722,35 +943,40 @@
    * @param {string} word The word being shown (for the aria label).
    */
   function showPanel(inner, word) {
-    setPanelContent(ensurePanelHost(word), inner, false);
+    setPanelContent(ensurePanelHost(PANEL_ID, `Omnia lookup: ${word}`), inner, false);
   }
 
   /**
-   * The open panel's host element, created and anchored if there is not one yet.
+   * A floating panel's host element, created and anchored if there is not one yet.
    *
-   * Reused rather than rebuilt so that loading -> result, and every note switch or field
-   * regeneration after it, redraw IN PLACE: a rebuilt host would re-anchor to wherever the
-   * pointer now is and throw away the scroll position mid-read.
+   * Reused rather than rebuilt so that loading -> result, and every redraw after it, happen IN
+   * PLACE: a rebuilt host would re-anchor to wherever the pointer now is and throw away the
+   * scroll position mid-read.
    *
-   * @param {string} word The word being shown (for the aria label).
+   * Shared by both panels. The anchoring is the part with the edge cases -- flipping left at
+   * the right edge, lifting at the bottom -- and a second copy of it would be a second set of
+   * them, drifting apart the first time one is fixed.
+   *
+   * @param {string} id The host element's id.
+   * @param {string} label The aria label.
    * @return {!ShadowRoot} The host's shadow root.
    */
-  function ensurePanelHost(word) {
-    const open = document.getElementById(PANEL_ID);
+  function ensurePanelHost(id, label, width) {
+    const open = document.getElementById(id);
     if (open && open.shadowRoot) {
       return open.shadowRoot;
     }
     const host = document.createElement('div');
-    host.id = PANEL_ID;
-    host.setAttribute('aria-label', `Omnia lookup: ${word}`);
+    host.id = id;
+    host.setAttribute('aria-label', label);
     // Anchor beside the pointer, then keep the whole panel on screen: flip to the left of the
     // pointer when it would run off the right edge, and lift it when it would run off the bottom.
-    const width = 362;
+    const panelWidth = width || 362;
     const height = Math.min(460, Math.round(window.innerHeight * 0.8));
     let left = lastPointer.x + CURSOR_OFFSET;
     let top = lastPointer.y + CURSOR_OFFSET;
-    if (left + width > window.innerWidth - 8) {
-      left = Math.max(8, lastPointer.x - width - CURSOR_OFFSET);
+    if (left + panelWidth > window.innerWidth - 8) {
+      left = Math.max(8, lastPointer.x - panelWidth - CURSOR_OFFSET);
     }
     if (top + height > window.innerHeight - 8) {
       top = Math.max(8, window.innerHeight - height - 8);
@@ -809,6 +1035,225 @@
     root.querySelectorAll('[data-omnia-generate-all]').forEach((el) => {
       el.addEventListener('click', () => requestGeneration(null));
     });
+  }
+
+  // -- correcting a phrase -------------------------------------------------------------
+  //
+  // The same shape as a lookup -- pill button, pending panel, answer -- but a separate panel and
+  // a separate endpoint, because it answers a different question and the two must be tellable
+  // apart at a glance. What arrives is a LIST of fixes, each with its own reason behind a
+  // button, and the phrase rewritten with the changes marked.
+
+  /**
+   * Draw the correction panel and wire every control it declares.
+   *
+   * Like the lookup panel, the markup is a string and the handlers go on afterwards by data
+   * attribute -- nothing is built with an inline ``on*`` a page's CSP could refuse.
+   *
+   * @param {string} inner The panel's inner HTML, from correct_view.js.
+   */
+  function showCorrectPanel(inner, settled) {
+    const root = ensurePanelHost(CORRECT_PANEL_ID, 'Omnia correction', 402);
+    // The panel scrolls (it inherits .omnia-panel's max-height), and every redraw rebuilds the
+    // subtree. Without this, pressing Why? on the fifth of six fixes throws you back to the top
+    // of a list that just re-animated, with the explanation you asked for now off screen.
+    // `settled` marks a redraw of content already on screen: keep the scroll, and suppress the
+    // entry animation, which is an introduction and not something to repeat.
+    const previous = root.querySelector('.omnia-panel');
+    const scrollTop = settled && previous ? previous.scrollTop : 0;
+    root.innerHTML =
+      `<style>${PANEL_CSS}${CORRECT_CSS}</style>` +
+      `<div class="omnia-panel correct${settled ? ' settled' : ''}">${inner}</div>`;
+    if (scrollTop) {
+      const panel = root.querySelector('.omnia-panel');
+      if (panel) {
+        panel.scrollTop = scrollTop;
+      }
+    }
+    root.querySelectorAll('[data-why]').forEach((el) => {
+      el.addEventListener('click', () => toggleWhy(Number(el.dataset.why)));
+    });
+    root.querySelectorAll('[data-mode]').forEach((el) => {
+      el.addEventListener('click', () => switchCorrectMode(el.dataset.mode));
+    });
+    root.querySelectorAll('[data-copy]').forEach((el) => {
+      el.addEventListener('click', () => copyCorrection(el));
+    });
+  }
+
+  /**
+   * Redraw the correction panel from the state in hand. A closed panel is left closed.
+   *
+   * @param {boolean=} settled Whether this is the SAME answer being redrawn (an explanation
+   *     opening or closing), where the scroll position and the settled animations are part of
+   *     what the user is looking at. False when the content changes underneath.
+   */
+  function rerenderCorrect(settled) {
+    if (!correctPanelIsOpen() || !correctState) {
+      return;
+    }
+    if (correctState.error) {
+      showCorrectPanel(CorrectView.failed(correctState.error, correctState.mode), false);
+      return;
+    }
+    if (!correctState.correction) {
+      showCorrectPanel(CorrectView.pending(correctState.mode), false);
+      return;
+    }
+    showCorrectPanel(
+      CorrectView.render(correctState.correction, {open: correctState.open}), !!settled
+    );
+  }
+
+  /**
+   * Show, or hide, one fix's explanation.
+   *
+   * The reason is already in the markup and merely hidden, so this is a redraw and not a
+   * request -- see correct_view.js.
+   *
+   * @param {number} index Which fix.
+   */
+  function toggleWhy(index) {
+    if (!correctState || !Number.isFinite(index)) {
+      return;
+    }
+    const at = correctState.open.indexOf(index);
+    if (at === -1) {
+      correctState.open.push(index);
+    } else {
+      correctState.open.splice(at, 1);
+    }
+    rerenderCorrect(true);  // the same answer, one paragraph wider
+  }
+
+  /**
+   * Check the same phrase as the other register.
+   *
+   * A fresh request, not a re-render: spoken and written are different answers to a different
+   * question, and the add-on remembers them separately (the register is part of its cache key),
+   * so switching back and forth costs nothing after the first of each.
+   *
+   * @param {string} mode 'written' or 'spoken'.
+   */
+  function switchCorrectMode(mode) {
+    if (!correctState || mode === correctState.mode || CorrectView.MODES.indexOf(mode) === -1) {
+      return;
+    }
+    sendCorrect(correctState.text, mode, false);
+  }
+
+  /**
+   * Put the corrected phrase on the clipboard.
+   *
+   * The plain sentence, not the marked-up one: what the user wants is something to paste, and
+   * markers pasted into an email are worse than no button at all.
+   *
+   * @param {!HTMLElement} button The Copy button, which reports the outcome itself.
+   */
+  function copyCorrection(button) {
+    if (!correctState || !correctState.correction) {
+      return;
+    }
+    const text = CorrectView.copyText(correctState.correction);
+    if (!text) {
+      return;
+    }
+    const done = (ok) => {
+      // Said ON the button rather than in a toast: it is the answer to pressing THAT control,
+      // and a toast for it would cover the sentence it just copied.
+      button.textContent = ok ? 'Copied' : 'Press ⌘C';
+      button.classList.toggle('done', ok);
+      if (!ok) {
+        selectCorrectedText();
+      }
+    };
+    try {
+      // A page can deny clipboard-write by permissions policy, and a document that is not
+      // focused rejects outright -- so the failure path SELECTS the sentence instead, leaving
+      // the user one keystroke away rather than with a button that silently did nothing.
+      navigator.clipboard.writeText(text).then(() => done(true), () => done(false));
+    } catch (_e) {
+      done(false);
+    }
+  }
+
+  /** Select the corrected sentence in the panel, so ⌘C works when the clipboard API will not. */
+  function selectCorrectedText() {
+    const host = document.getElementById(CORRECT_PANEL_ID);
+    const node = host && host.shadowRoot && host.shadowRoot.querySelector('.omnia-correct-text');
+    if (!node) {
+      return;
+    }
+    try {
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      const selection = (host.shadowRoot.getSelection && host.shadowRoot.getSelection()) ||
+        window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+    } catch (_e) {
+      // Not every engine lets a shadow root be selected; the sentence is still readable.
+    }
+  }
+
+  /**
+   * Ask the background worker to correct a phrase and render the answer in a panel.
+   *
+   * Through the service worker, not from here: a page-context fetch to 127.0.0.1 carries an
+   * Origin header and the add-on refuses those, because this spends the user's LLM credits.
+   *
+   * @param {string} text The selected phrase.
+   * @param {string} mode 'written', 'spoken', or '' for whatever Omnia is set to.
+   * @param {boolean} refresh True to ignore the remembered answer and ask again.
+   */
+  function sendCorrect(text, mode, refresh) {
+    const phrase = String(text || '').trim();
+    if (!phrase) {
+      return;
+    }
+    // The register shown while waiting is the one ASKED for. An empty mode means the add-on
+    // decides, and until it answers there is nothing truthful to light up, so the toggle shows
+    // its default and is corrected by the answer.
+    const asked = CorrectView.MODES.indexOf(mode) === -1 ? '' : mode;
+    const ticket = ++correctRequest;
+    correctState = {text: phrase, mode: asked || 'written', correction: null, open: [], error: ''};
+    showCorrectPanel(CorrectView.pending(correctState.mode), false);
+    try {
+      chrome.runtime.sendMessage(
+        {type: 'omnia-check', text: phrase, mode: asked, refresh: !!refresh},
+        (response) => {
+          // Read BEFORE the guard: an unread lastError is what Chrome logs on the page's
+          // console as "Unchecked runtime.lastError", and bailing out is not a reason to leave
+          // one behind.
+          const failure = chrome.runtime.lastError;
+          // The panel this answer belongs to may be gone -- Escape, or a click outside it,
+          // while the check was in flight. Drawing now would BUILD one at wherever the pointer
+          // has since moved, resurrecting something the user dismissed.
+          //
+          // The ticket covers what the phrase cannot: a second request for the SAME phrase in
+          // the other register. Not the mode either, since the answer's own mode is adopted
+          // below -- only "is this still the request the panel is waiting for" is the question.
+          if (!correctPanelIsOpen() || !correctState || ticket !== correctRequest) {
+            return;
+          }
+          if (failure || !response || !response.ok) {
+            correctState.error =
+              (failure && failure.message) ||
+              (response && response.error) ||
+              'Unknown error.';
+            rerenderCorrect();
+            return;
+          }
+          correctState.correction = response.result || {};
+          correctState.mode = CorrectView.modeOf(correctState.correction);
+          correctState.open = [];
+          rerenderCorrect();
+        }
+      );
+    } catch (err) {
+      correctState.error = String(err);
+      rerenderCorrect();
+    }
   }
 
   /**
@@ -1411,15 +1856,22 @@
     }
     // The panel is a popover: clicking anywhere outside it must close it. event.target is the
     // shadow HOST for a click inside the panel, so a plain identity check is enough.
-    const panel = document.getElementById(PANEL_ID);
-    if (panel && event.target !== panel && !panel.contains(event.target)) {
-      removePanel();
-    }
+    [PANEL_ID, CORRECT_PANEL_ID].forEach((id) => {
+      const panel = document.getElementById(id);
+      if (panel && event.target !== panel && !panel.contains(event.target)) {
+        panel.remove();
+        if (id === PANEL_ID) {
+          panelState = null;
+        } else {
+          correctState = null;
+        }
+      }
+    });
   }
   function onEscapeKeydown(event) {
     if (event.key === 'Escape') {
       removeTooltip();
-      removePanel();
+      removePanels();
     }
   }
   document.addEventListener('mousedown', onOutsideMousedown, true);
