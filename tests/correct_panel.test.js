@@ -230,23 +230,68 @@ const tests = {
     assert.strictEqual(view.copyText(null), '');
   },
 
-  'an answer with nothing to copy offers no button, and no empty box': () => {
-    // `already_good` with no rewrite is plausible: nothing was rewritten. An empty "Corrected"
-    // box above a Copy button that does nothing and says nothing is worse than no box.
-    const payload = {already_good: true, changed: false, fixes: [], mode: 'written'};
+  'an approved sentence says so, and shows the sentence it approved of': () => {
+    // What `already_good` actually looks like on the wire: the add-on derives it from the two
+    // sentences matching, so the rewrite is the original echoed back rather than absent.
+    const payload = {
+      already_good: true,
+      changed: false,
+      fixes: [],
+      mode: 'written',
+      rewritten: 'I went to the shop.',
+      highlight: [['I went to the shop.', false]],
+    };
     const html = view.render(payload, {open: []});
-    assert.ok(!html.includes('data-copy'), 'a Copy button with nothing to copy');
-    assert.ok(!html.includes('omnia-correct-final"'), 'an empty Corrected box');
-    assert.ok(/nothing to change/i.test(text(html)), 'and it stopped saying anything at all');
+
+    assert.ok(/nothing to change/i.test(text(html)), 'it said nothing about the verdict');
+    assert.ok(text(html).includes('I went to the shop.'), 'it hid the approved sentence');
+    assert.ok(!html.includes('<mark'), 'it marked words in a sentence nobody changed');
   },
 
-  'runs without a rewrite are still readable, and still offer nothing to copy': () => {
-    // The case the empty-box guard does NOT cover: there is a sentence to show (the runs), but
-    // `copyText` reads `rewritten`, so a Copy button here would be one that does nothing.
-    const html = view.render(
-      {highlight: [['I went.', true]], fixes: [], mode: 'written'}, {open: []}
-    );
-    assert.ok(text(html).includes('I went.'), 'it hid a sentence it could perfectly well show');
+  'runs that do not spell the rewrite are refused': () => {
+    // The panel renders the RUNS and Copy hands over `rewritten`, so runs that disagree put
+    // something on the clipboard other than the sentence on screen — to a user who by
+    // definition did not proofread it. Better unmarked and honest than marked and wrong.
+    //
+    // The add-on computes the runs and guarantees they join back, which is why this is cheap:
+    // it costs one comparison and closes a version skew. `check.py::_as_runs` in the desktop
+    // clipper makes the same call, and the two must not diverge.
+    const runs = view.runsOf({
+      rewritten: 'I went to the shop.',
+      highlight: [['something else entirely', true]],
+    });
+
+    assert.deepStrictEqual(runs, [['I went to the shop.', false]]);
+  },
+
+  'runs that do spell it are kept whole': () => {
+    const runs = view.runsOf({
+      rewritten: 'I went.',
+      highlight: [['I ', false], ['went.', true]],
+    });
+
+    assert.deepStrictEqual(runs, [['I ', false], ['went.', true]]);
+  },
+
+  'what is shown and what is copied can never disagree': () => {
+    // The property the two rules above exist to hold, asserted directly.
+    [
+      {rewritten: 'I went.', highlight: [['I ', false], ['went.', true]]},
+      {rewritten: 'I went.', highlight: [['wrong', true]]},
+      {rewritten: 'I went.', highlight: []},
+    ].forEach((payload) => {
+      const shown = text(view.render(Object.assign({fixes: []}, payload), {open: []}));
+      assert.ok(
+        shown.includes(view.copyText(payload)),
+        'the panel showed one sentence and Copy would hand over another: ' + shown
+      );
+    });
+  },
+
+  'a payload carrying nothing at all says so': () => {
+    const html = view.render({fixes: [], mode: 'written'}, {open: []});
+
+    assert.ok(/did not return a correction/i.test(text(html)), 'an empty panel');
     assert.ok(!html.includes('data-copy'), 'a Copy button with nothing behind it');
   },
 
