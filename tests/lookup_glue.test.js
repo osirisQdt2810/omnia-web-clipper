@@ -23,6 +23,7 @@ const vm = require('vm');
 
 const SRC = path.join(__dirname, '..', 'src');
 const PANEL_ID = 'omnia-clipper-lookup-panel';
+const CORRECT_PANEL_ID = 'omnia-clipper-correct-panel';
 const TOOLTIP_ID = 'omnia-clipper-tooltip';
 
 // -- the smallest DOM the content script can run against -------------------------------------
@@ -349,15 +350,21 @@ function makeAudioElement(options) {
 }
 
 /**
- * Load lookup_view.js + content.js against a fresh fake page.
+ * Load both view models + content.js against a fresh fake page.
+ *
+ * In the SAME order the manifest lists them: content.js reads both globals at load time, so a
+ * view model loaded after it would leave that binding undefined and every panel dead.
+ *
  * @param {{audio: ?Object, element: ?Object}=} media What the page can play, if anything.
  * @return {!Object} `{document, chrome, window}` — the page the content script now drives.
  */
 function loadContentScript(media) {
   const scope = {};
-  vm.compileFunction(fs.readFileSync(path.join(SRC, 'lookup_view.js'), 'utf8'), ['self'], {
-    filename: 'lookup_view.js',
-  })(scope);
+  ['lookup_view.js', 'correct_view.js'].forEach((file) => {
+    vm.compileFunction(fs.readFileSync(path.join(SRC, file), 'utf8'), ['self'], {
+      filename: file,
+    })(scope);
+  });
 
   const document = makeDocument();
   const chrome = makeChrome();
@@ -416,6 +423,67 @@ function press(page, attribute, value) {
   control.fire('click');
 }
 
+/** The open CORRECTION panel's shadow root, or null. */
+function correctPanel(page) {
+  const host = page.document.getElementById(CORRECT_PANEL_ID);
+  return host ? host.shadowRoot : null;
+}
+
+/** Press the control carrying `attribute="value"` in the open correction panel. */
+function pressCorrect(page, attribute, value) {
+  const root = correctPanel(page);
+  assert.ok(root, 'no correction panel is open');
+  const control = root.bound.filter(function (element) {
+    return element.attribute === attribute && (value === undefined || element.value === value);
+  })[0];
+  assert.ok(control, 'the panel has no ' + attribute + '="' + value + '" to press');
+  control.fire('click');
+}
+
+/**
+ * Select a phrase and press the wand, then answer the pill's own probe.
+ * @param {!Object} page The loaded page.
+ * @return {!Promise<void>} Resolves with the correction panel open on "Checking…".
+ */
+async function openCorrect(page) {
+  page.document.fire('mouseup', {clientX: 40, clientY: 60, target: page.document.body});
+  await settle();
+  const pill = page.document.getElementById(TOOLTIP_ID);
+  assert.ok(pill, 'no pill appeared for the selection');
+  answer(page.chrome, pending(page.chrome, 'omnia-lookup'), {ok: true, result: {cards: []}});
+  pill.children[2].fire('mousedown');
+}
+
+/** The unanswered /check request for `text` — `pending` only ever offers the oldest. */
+function checkFor(chrome, text) {
+  return (
+    chrome.sent.filter(function (entry) {
+      return !entry.answered && entry.message.type === 'omnia-check' && entry.message.text === text;
+    })[0] || null
+  );
+}
+
+/** A correction the add-on might send back. */
+function correctionPayload(mode) {
+  return {
+    original: 'I have went.',
+    rewritten: 'I went.',
+    mode: mode || 'written',
+    already_good: false,
+    changed: true,
+    fixes: [
+      {
+        before: 'have went',
+        after: 'went',
+        why: 'The simple past is what a finished action takes.',
+        kind: 'grammar',
+        is_deletion: false,
+      },
+    ],
+    highlight: [['I ', false], ['went.', true]],
+  };
+}
+
 /**
  * Select a word and press the magnifier, then answer the pill's own probe.
  * @param {!Object} page The loaded page.
@@ -426,7 +494,9 @@ async function openLookup(page) {
   await settle();
   const pill = page.document.getElementById(TOOLTIP_ID);
   assert.ok(pill, 'no "+" pill appeared for the selection');
-  assert.strictEqual(pill.children.length, 2, 'the pill should carry "+" and the magnifier');
+  assert.strictEqual(
+    pill.children.length, 3, 'the pill should carry "+", the magnifier and the wand'
+  );
   // The magnifier probes on its own ("2 cards match"); answer it so it is out of the way.
   answer(page.chrome, pending(page.chrome, 'omnia-lookup'), {ok: true, result: {cards: []}});
   pill.children[1].fire('mousedown');
@@ -848,6 +918,249 @@ const tests = {
       !/class="fnote panel-note"/.test(panel(page).innerHTML),
       'the explanation belonged to the note it was asked about, not to the panel'
     );
+  },
+
+  // -- correcting a phrase ---------------------------------------------------------------
+  // What correct_view.js cannot see: which panel is open, whether an answer still belongs to
+  // the phrase on screen, and what a second press of the register toggle actually does.
+
+  'the wand opens the correction panel and asks the worker, not the page': async () => {
+    const page = loadContentScript();
+    await openCorrect(page);
+
+    assert.ok(correctPanel(page), 'the wand opened nothing');
+    assert.ok(
+      /<p class="omnia-correct-pending">/.test(correctPanel(page).innerHTML),
+      'it did not say it was working'
+    );
+    const asked = pending(page.chrome, 'omnia-check');
+    assert.ok(asked, 'the check never left the page');
+    assert.strictEqual(asked.message.text, 'run');
+    assert.strictEqual(asked.message.mode, '', 'the page overrode Omnia’s configured register');
+  },
+
+  'the answer replaces the spinner, in the register Omnia judged it in': async () => {
+    const page = loadContentScript();
+    await openCorrect(page);
+    answer(page.chrome, pending(page.chrome, 'omnia-check'), {
+      ok: true,
+      result: correctionPayload('spoken'),
+    });
+    await settle();
+
+    const html = correctPanel(page).innerHTML;
+    assert.ok(
+      !/<p class="omnia-correct-pending">/.test(html), 'the spinner outlived the answer'
+    );
+    assert.ok(html.indexOf('have went') !== -1, 'the fix never made it to the panel');
+    assert.ok(
+      /omnia-correct-mode-on" data-mode="spoken"/.test(html),
+      'the panel lit the register it ASKED for rather than the one that came back'
+    );
+  },
+
+  'the explanation button opens only its own reason, without asking again': async () => {
+    const page = loadContentScript();
+    await openCorrect(page);
+    answer(page.chrome, pending(page.chrome, 'omnia-check'), {
+      ok: true, result: correctionPayload(),
+    });
+    await settle();
+    assert.ok(/data-why-text="0"[^>]* hidden/.test(correctPanel(page).innerHTML));
+
+    pressCorrect(page, 'data-why', '0');
+    await settle();
+
+    assert.ok(
+      !/data-why-text="0"[^>]* hidden/.test(correctPanel(page).innerHTML),
+      'the reason stayed shut'
+    );
+    assert.strictEqual(
+      pending(page.chrome, 'omnia-check'), null,
+      'opening a reason that was already in hand cost another request'
+    );
+  },
+
+  'switching register asks again, because it is a different question': async () => {
+    const page = loadContentScript();
+    await openCorrect(page);
+    answer(page.chrome, pending(page.chrome, 'omnia-check'), {
+      ok: true, result: correctionPayload('written'),
+    });
+    await settle();
+
+    pressCorrect(page, 'data-mode', 'spoken');
+    await settle();
+
+    const second = pending(page.chrome, 'omnia-check');
+    assert.ok(second, 'the toggle re-rendered instead of asking');
+    assert.strictEqual(second.message.mode, 'spoken');
+    assert.strictEqual(second.message.text, 'run', 'it checked something other than the phrase');
+  },
+
+  'pressing the register already showing does nothing at all': async () => {
+    const page = loadContentScript();
+    await openCorrect(page);
+    answer(page.chrome, pending(page.chrome, 'omnia-check'), {
+      ok: true, result: correctionPayload('written'),
+    });
+    await settle();
+
+    pressCorrect(page, 'data-mode', 'written');
+    await settle();
+
+    assert.strictEqual(
+      pending(page.chrome, 'omnia-check'), null,
+      'the panel re-asked for the answer it was already showing'
+    );
+  },
+
+  'the register the panel remembers is the one that came back, not the one asked for': async () => {
+    // Nothing on screen shows this: the answer's own mode is what gets rendered either way. It
+    // surfaces one press later -- the toggle compares against what the panel THINKS it is in,
+    // so a stale value makes the lit button do nothing and the unlit one re-ask for what is
+    // already up.
+    const page = loadContentScript();
+    await openCorrect(page);  // asks with mode '' -- Omnia decides
+    answer(page.chrome, pending(page.chrome, 'omnia-check'), {
+      ok: true, result: correctionPayload('spoken'),
+    });
+    await settle();
+
+    pressCorrect(page, 'data-mode', 'written');
+    await settle();
+
+    const second = checkFor(page.chrome, 'run');
+    assert.ok(second, 'pressing the OTHER register did nothing');
+    assert.strictEqual(second.message.mode, 'written');
+  },
+
+  'a correction that arrives after the panel is dismissed does not resurrect it': async () => {
+    // The same trap the lookup panel has, and worse: ensurePanelHost would BUILD a host at
+    // wherever the pointer has since moved, putting a panel back that the user closed.
+    const page = loadContentScript();
+    await openCorrect(page);
+    page.document.fire('keydown', {key: 'Escape'});
+    assert.strictEqual(correctPanel(page), null, 'Escape did not close the correction panel');
+
+    answer(page.chrome, pending(page.chrome, 'omnia-check'), {
+      ok: true, result: correctionPayload(),
+    });
+    await settle();
+
+    assert.strictEqual(
+      page.document.getElementById(CORRECT_PANEL_ID), null,
+      'a dismissed correction panel came back'
+    );
+  },
+
+  'an answer for a phrase the user has moved on from is dropped': async () => {
+    // Two checks in flight and the slow one lands last. Without the phrase guard it would
+    // overwrite the newer answer with a correction of something else entirely.
+    const page = loadContentScript();
+    await openCorrect(page);
+    const first = pending(page.chrome, 'omnia-check');
+
+    // A new selection, then the wand again: this is now a different phrase.
+    page.window.getSelection = function () {
+      return {
+        rangeCount: 1,
+        isCollapsed: false,
+        toString: function () { return 'walked'; },
+        getRangeAt: function () { return {commonAncestorContainer: page.document.body}; },
+      };
+    };
+    await openCorrect(page);
+    // By phrase, not by `pending`: that hands back the OLDEST unanswered request, which is the
+    // one still in flight -- answering THAT here would never exercise the guard.
+    answer(page.chrome, checkFor(page.chrome, 'walked'), {
+      ok: true,
+      result: Object.assign(correctionPayload(), {
+        rewritten: 'I walked.', fixes: [], highlight: [['I walked.', false]],
+      }),
+    });
+    await settle();
+    assert.ok(correctPanel(page).innerHTML.indexOf('I walked.') !== -1, 'the new answer is not up');
+
+    const stale = correctionPayload();
+    stale.rewritten = 'STALE ANSWER';
+    stale.highlight = [['STALE ANSWER', false]];
+    answer(page.chrome, first, {ok: true, result: stale});
+    await settle();
+
+    assert.ok(
+      correctPanel(page).innerHTML.indexOf('STALE ANSWER') === -1,
+      'an answer to the previous phrase overwrote the one on screen'
+    );
+  },
+
+  'a failed check says why, in the words the worker sent': async () => {
+    const page = loadContentScript();
+    await openCorrect(page);
+    answer(page.chrome, pending(page.chrome, 'omnia-check'), {
+      ok: false,
+      error: 'Phrase Check is switched off. Turn it on in Anki (Tools → Omnia → Phrase Check).',
+    });
+    await settle();
+
+    const html = correctPanel(page).innerHTML;
+    assert.ok(
+      /<p class="omnia-correct-error">/.test(html), 'a failure rendered as an answer'
+    );
+    assert.ok(html.indexOf('switched off') !== -1, 'the panel reworded the reason');
+    assert.ok(!/omnia-correct-fixes">\s*<li/.test(html), 'it showed fixes it never received');
+  },
+
+  'a new selection clears the correction panel, not just the lookup one': async () => {
+    // An open panel is an answer about the text that WAS selected. Left up over a new
+    // selection it is not stale decoration -- it is a wrong answer to the question on screen.
+    const page = loadContentScript();
+    await openCorrect(page);
+    answer(page.chrome, pending(page.chrome, 'omnia-check'), {
+      ok: true, result: correctionPayload(),
+    });
+    await settle();
+    assert.ok(correctPanel(page), 'nothing was open to clear');
+
+    page.document.fire('mouseup', {clientX: 90, clientY: 90, target: page.document.body});
+    await settle();
+
+    assert.strictEqual(
+      page.document.getElementById(CORRECT_PANEL_ID), null,
+      'the correction outlived the selection it was about'
+    );
+  },
+
+  'the two panels never share the screen': async () => {
+    // They answer different questions about the same selection, and both carry controls. Two
+    // stacked popovers at the pointer is not a layout anybody meant.
+    const page = loadContentScript();
+    await openLookup(page);
+    answer(page.chrome, pending(page.chrome, 'omnia-lookup'), {
+      ok: true, result: {word: 'run', found: false, cards: []},
+    });
+    await settle();
+    assert.ok(panel(page), 'the lookup panel did not open');
+
+    await openCorrect(page);
+
+    assert.ok(correctPanel(page), 'the correction panel did not open');
+    assert.strictEqual(
+      page.document.getElementById(PANEL_ID), null,
+      'the lookup panel was left underneath the correction panel'
+    );
+  },
+
+  'a dead extension context takes the correction panel down too': async () => {
+    // Not tidiness: ensurePanelHost ADOPTS a host by id, so one left behind would be inherited
+    // whole by the instance a re-injection starts -- wired to a context that cannot talk to Anki.
+    const page = loadContentScript();
+    await openCorrect(page);
+    assert.ok(correctPanel(page));
+
+    page.window.__omniaClipperTeardown();
+
+    assert.strictEqual(page.document.getElementById(CORRECT_PANEL_ID), null);
   },
 };
 

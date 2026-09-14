@@ -16,8 +16,9 @@
 
 importScripts('shared.js');
 
-const {loadSettings, ankiConnect, buildLookupUrl, requestGenerate, lookupErrorMessage} =
-  self.OmniaClipper;
+const {
+  loadSettings, ankiConnect, buildLookupUrl, requestGenerate, requestCheck, lookupErrorMessage,
+} = self.OmniaClipper;
 
 const CONTEXT_MENU_ID = 'omnia-clipper-send-selection';
 
@@ -220,8 +221,12 @@ async function reinjectContentScript() {
         // executeScript's `files` are resolved from the EXTENSION ROOT (unlike importScripts,
         // which is service-worker-relative), so the src/ prefix is required after the refactor.
         // Same list, same ORDER as the manifest's content_scripts: content.js reads the panel's
-        // view model off the global lookup_view.js defines, so it has to be injected first.
-        .executeScript({target: {tabId: tab.id}, files: ['src/lookup_view.js', 'src/content.js']})
+        // view models off the globals lookup_view.js and correct_view.js define, so both have
+        // to be injected first -- and in the same order the manifest lists them.
+        .executeScript({
+          target: {tabId: tab.id},
+          files: ['src/lookup_view.js', 'src/correct_view.js', 'src/content.js'],
+        })
         .catch(() => {});
     }
   } catch (_e) {
@@ -368,6 +373,23 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         const settings = await loadSettings();
         const base = settings.lookupUrl || 'http://127.0.0.1:8766';
         const result = await requestGenerate(base, message.noteId, message.fields);
+        sendResponse({ok: true, result: result});
+      } catch (err) {
+        sendResponse({ok: false, error: err && err.message ? err.message : String(err)});
+      }
+    })();
+    return true;  // async sendResponse
+  }
+  if (message && message.type === 'omnia-check') {
+    // The Correct button. Here rather than in the page for the same reason as /generate: a
+    // page-context fetch to 127.0.0.1 carries an Origin header and the add-on refuses those,
+    // because correcting a phrase spends the user's LLM credits and no web page may spend them.
+    // The error is already a sentence the user can act on (shared.js::checkErrorMessage).
+    (async () => {
+      try {
+        const settings = await loadSettings();
+        const base = settings.lookupUrl || 'http://127.0.0.1:8766';
+        const result = await requestCheck(base, message.text, message.mode, message.refresh);
         sendResponse({ok: true, result: result});
       } catch (err) {
         sendResponse({ok: false, error: err && err.message ? err.message : String(err)});
