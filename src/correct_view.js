@@ -95,13 +95,26 @@
    * @return {!Array<!Array>} `[[text, isNew], …]`
    */
   function runsOf(correction) {
+    const rewritten = (correction && correction.rewritten) || '';
     const runs = (correction && correction.highlight) || [];
     if (!Array.isArray(runs) || !runs.length) {
       // With no rewrite either, this is [['', false]] -- one empty run, which finalBlock reads
       // as "there is nothing here" rather than as a sentence.
-      return [[(correction && correction.rewritten) || '', false]];
+      return [[rewritten, false]];
     }
-    return runs.filter((run) => Array.isArray(run) && run.length >= 1);
+    const kept = runs.filter((run) => Array.isArray(run) && run.length >= 1);
+    // Refused unless they spell EXACTLY the sentence Copy would hand over. The panel renders
+    // the runs and the button copies `rewritten`, so runs that disagree put something on the
+    // clipboard other than what is on screen -- to a user who by definition did not proofread
+    // it, which is who this feature is for. Better unmarked and honest than marked and wrong.
+    //
+    // The add-on computes the runs and guarantees this, which is exactly why it is cheap to
+    // check: a version skew or a bug upstream should not reach someone's clipboard. The desktop
+    // panel makes the same call in `check.py::_as_runs`, and the two must not diverge.
+    if (kept.map((run) => run[0]).join('') !== rewritten) {
+      return [[rewritten, false]];
+    }
+    return kept;
   }
 
   /**
@@ -181,6 +194,16 @@
         '<span class="omnia-correct-title">Correction</span>' +
         modeToggle(mode) +
       '</div>';
+
+    if (!copyText(correction) && !fixes.length) {
+      // Neither a correction nor an approval: the payload carries nothing to show. Saying so
+      // beats an empty panel under a "Correction" heading, which reads as the tool being broken
+      // rather than as the answer being empty. The desktop panel says the same thing.
+      return (
+        header +
+        '<p class="omnia-correct-error">Omnia did not return a correction for that phrase.</p>'
+      );
+    }
 
     if (correction && correction.already_good && !fixes.length) {
       // A real answer, and a different one from "nothing came back". Saying "no changes" beside
