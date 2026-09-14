@@ -278,10 +278,10 @@
       <label for="lookupUrl">Lookup service URL</label>
       <input type="text" id="lookupUrl" placeholder="http://127.0.0.1:8766" />
       <div class="hint">
-        Copy it from Anki: Tools &rarr; Omnia &rarr; Word Lookup &rarr; Configure&hellip;, the
-        &ldquo;Clipper access token&rdquo; box. Looking a word up needs no token; regenerating
-        its fields does, because that rewrites the note. Omnia can also fill this in for you
-        when it opens Settings.
+        Where Omnia listens, not AnkiConnect &mdash; a different port on the same machine. The
+        default is right unless you changed it in Anki (Tools &rarr; Omnia &rarr; Word Lookup
+        &rarr; Configure&hellip;). Nothing to copy and no key to enter: the service is
+        loopback-only, so being able to reach it is the permission.
       </div>
 
       <div class="actions" style="margin-top: 12px">

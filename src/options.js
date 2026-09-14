@@ -309,7 +309,7 @@
     return true;
   }
 
-  /** Drop the query string, so a token handed over in the URL does not sit in history. */
+  /** Drop the query string, so what Omnia asked for in the URL does not sit in history. */
   function stripQuery() {
     if (window.history && window.history.replaceState) {
       window.history.replaceState({}, '', 'options.html');
@@ -331,10 +331,9 @@
   }
 
   document.addEventListener('DOMContentLoaded', () => {
-    // Omnia hands the /generate token over the same way it asks for a reload: by opening this
-    // page with it in the query string. So it is read FIRST and, when there is one, stored
-    // BEFORE the reload handshake runs — chrome.runtime.reload() destroys this page, and a
-    // write still in flight would be lost, leaving the user to copy the token by hand.
+    // Omnia asks for a reload by opening this page with a flag in the query string, so that is
+    // dealt with FIRST: chrome.runtime.reload() destroys this page, and anything init() had
+    // started would be lost half-done.
     if (reloadIfOmniaAsked()) return;
     init();
   });

@@ -42,13 +42,14 @@
 
   // The settings that live in chrome.storage.LOCAL rather than chrome.storage.sync.
   //
-  // Everything else is a preference the user would want on their other machines, and sync is
-  // exactly right for it. The lookup token is not a preference: it is a credential for a
-  // loopback service running on THIS machine, issued by THIS machine's copy of Omnia. Syncing
-  // it uploads a secret to Google's servers and copies it into every Chrome profile signed into
-  // the account, where it cannot even work — the Omnia over there issued a different one. So the
-  // split is not tidiness; it is the difference between a machine-local secret staying local
-  // and being replicated to places that have no use for it.
+  // EMPTY, and correctly so: every setting the clipper has is a preference the user would want
+  // on their other machines, and sync is exactly right for all of them. The list existed for the
+  // lookup token — a machine-local credential that syncing would have replicated to profiles
+  // where it could not work — and that is gone.
+  //
+  // Kept rather than deleted because the RULE is what matters, and it is not obvious: anything
+  // issued by this machine's copy of Omnia, or true only of this machine, belongs here and not
+  // in sync. Adding a key to this list is the whole migration.
   const LOCAL_KEYS = [];
 
   /**
@@ -84,7 +85,7 @@
             const own = local[key];
             const synced = stored[key];
             // A value still in sync was written by a build that stored it there. Adopt it so
-            // nobody has to re-enter a token that already works, and move it out of sync.
+            // nobody has to re-enter a setting that already works, and move it out of sync.
             merged[key] = own || synced || DEFAULTS[key];
             if (!own && synced) {
               migrateOutOfSync(key, synced);
@@ -331,9 +332,9 @@
         'Omnia could not read the request (400). This is a bug in the clipper — ' +
         'please report it.',
       401:
-        'Omnia rejected the access token (401). Copy the token from Anki ' +
-        '(Tools → Omnia → Word Lookup → Configure…, “Clipper access token”) into this ' +
-        'extension’s Options.',
+        'Omnia asked this request to authenticate (401), which this clipper no longer does and ' +
+        'current versions no longer ask for. The Omnia running in Anki is older than this ' +
+        'extension — update the add-on (Tools → Add-ons → Check for Updates).',
       403:
         'Omnia refused the request (403) because it did not come from this extension’s ' +
         'background worker — the add-on accepts /generate only from an extension, never from ' +
@@ -355,8 +356,6 @@
    * already-actionable Error.
    *
    * @param {string} baseUrl Where the add-on's lookup service listens.
-   * @param {string} token The shared secret from settings (sent even when empty, so the
-   *     add-on's own 401 explains it rather than this half guessing).
    * @param {number} noteId The note to regenerate.
    * @param {?Array<string>=} fields Which fields, or null/undefined for every field.
    * @return {!Promise<!Object>} `{note_id, results: [{field, status, message, ...}]}`.
