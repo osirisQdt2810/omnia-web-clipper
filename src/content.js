@@ -261,6 +261,37 @@
       background: rgba(31,157,99,0.16); color: inherit;
       font-weight: 700; border-radius: 3px; padding: 0 2px;
     }
+    /* Where a save says where the note went. Hidden until there is something to say. */
+    .omnia-correct-said {
+      margin: 8px 0 0; font-size: 12px; line-height: 1.5; color: #147a4b;
+    }
+    .omnia-correct-said:empty { display: none; }
+    /* A save that FAILED reports in the same slot, in the same amber the panel already uses
+       for a failed check — the correction stays on screen and the Save button stays live, so
+       this has to read as "that one press did not work", not as "the answer is wrong". */
+    .omnia-correct-said.omnia-correct-said-bad { color: #a35b00; }
+    /* Its own box, like every other control in these two sheets — there is no generic
+       bare-element button rule anywhere in them. A shadow root blocks the PAGE's styles, not
+       the UA's, and a button's UA font/background/border/appearance are non-inherited
+       declarations that beat the panel's inherited font. Without this the headline control of
+       the panel paints as a native grey button in Arial with an outset border, flush against
+       the flat outlined Copy button beside it. */
+    .omnia-correct-save {
+      font: inherit; font-size: 11px; cursor: pointer;
+      background: transparent; color: #6b727c;
+      border: 1px solid #dfe3e8; border-radius: 7px; padding: 2px 9px;
+      margin-right: 6px;
+      transition: color 0.15s ease, border-color 0.15s ease;
+    }
+    .omnia-correct-save:hover:not([disabled]) { border-color: #1f9d63; color: #1f9d63; }
+    .omnia-correct-save.omnia-correct-saved {
+      border-color: #1f9d63; color: #1f9d63; font-weight: 600;
+    }
+    .omnia-correct-save[disabled] { opacity: .7; cursor: default; }
+    /* "N more fixes — all of them are kept if you save this." */
+    .omnia-correct-more {
+      margin: 0 0 10px; font-size: 12px; color: #6b727c;
+    }
     .omnia-correct-pending, .omnia-correct-error { margin: 0; font-size: 13px; }
     .omnia-correct-pending { color: #6b727c; }
     .omnia-correct-pending::after {
@@ -272,12 +303,14 @@
     .omnia-correct-error { color: #a35b00; line-height: 1.5; }
     @media (prefers-color-scheme: dark) {
       .omnia-correct-fix { background: rgba(38,42,49,0.75); border-color: #363b44; }
-      .omnia-correct-mode, .omnia-correct-why-btn, .omnia-correct-copy { border-color: #363b44; }
+      .omnia-correct-mode, .omnia-correct-why-btn, .omnia-correct-copy,
+      .omnia-correct-save { border-color: #363b44; }
       .omnia-correct-mode-on { color: #ffffff; border-color: #1f9d63; }
       .omnia-correct-why { color: #b9bfc8; border-top-color: #363b44; }
       .omnia-correct-final { border-top-color: #363b44; }
       .omnia-correct-before { color: #e0736a; }
-      .omnia-correct-after, .omnia-correct-good { color: #5fd39b; }
+      .omnia-correct-after, .omnia-correct-good, .omnia-correct-said { color: #5fd39b; }
+      .omnia-correct-said.omnia-correct-said-bad { color: #e0a24a; }
       .omnia-correct-new { background: rgba(31,157,99,0.28); }
     }
     /* A redraw of an answer already on screen. The entry animation is an introduction; played
@@ -1079,6 +1112,9 @@
     root.querySelectorAll('[data-copy]').forEach((el) => {
       el.addEventListener('click', () => copyCorrection(el));
     });
+    root.querySelectorAll('[data-save]').forEach((el) => {
+      el.addEventListener('click', () => saveCorrection(el));
+    });
   }
 
   /**
@@ -1101,7 +1137,16 @@
       return;
     }
     showCorrectPanel(
-      CorrectView.render(correctState.correction, {open: correctState.open}), !!settled
+      CorrectView.render(correctState.correction, {
+        open: correctState.open,
+        saved: correctState.saved || '',
+        // The in-flight leg, for the same reason `saved` is here: this subtree is rebuilt on
+        // every explanation toggle, so anything written onto the button instead of into state
+        // is silently undone by the next redraw.
+        saving: !!correctState.saving,
+        saveError: correctState.saveError || '',
+      }),
+      !!settled
     );
   }
 
@@ -1177,6 +1222,94 @@
     }
   }
 
+  /**
+   * Keep this correction as a card in Anki.
+   *
+   * The phrase is sent, not the correction: Omnia looks it up again (a cache hit) and builds the
+   * note itself. Letting a page post note content into somebody's collection would be a
+   * different feature with a different risk, and this one does not need it.
+   *
+   * @param {!HTMLElement} button The Save button, which reports the outcome itself.
+   */
+  function saveCorrection(button) {
+    // The STATE decides, not the button: the button is a fresh node after every redraw, so
+    // `button.disabled` alone was only ever true between a press and the next re-render.
+    if (
+      !correctState ||
+      !correctState.correction ||
+      correctState.saving ||
+      correctState.saved ||
+      button.disabled
+    ) {
+      return;
+    }
+    const phrase = correctState.text;
+    const mode = correctState.mode;
+    const state = correctState;
+    // Into STATE, then redraw — not onto the button. A label poked into this subtree is wiped
+    // by the next redraw (any explanation toggle), which brought back an enabled Save button
+    // mid-flight and let one phrase become two notes.
+    state.saving = true;
+    state.saveError = '';
+    rerenderCorrect(true);
+
+    // The ticket, captured at press time, exactly as `sendCorrect` does — and for the reason
+    // `sendCorrect` states: the phrase alone cannot tell two requests apart, and switching
+    // register re-asks about the SAME phrase. Comparing text let this answer stamp "Saved"
+    // onto the spoken state that replaced it, over a correction nobody saved.
+    const ticket = correctRequest;
+
+    /**
+     * Whether this answer still belongs to what is on screen.
+     *
+     * The panel may have been dismissed, or moved on to another question, while Anki was
+     * writing. The note is saved either way — this only decides whether anyone is told, and
+     * drawing into a dismissed panel would resurrect something the user closed.
+     */
+    // Two checks that are each sufficient today, deliberately: `sendCorrect` assigns a whole
+    // new `correctState` object, so identity already catches a replaced question, and the
+    // ticket catches it too. Identity is what makes the writes below safe (they go to the
+    // state this press belongs to, never to whatever is current); the ticket is the idiom the
+    // rest of this file uses, and survives a refactor that mutates the state in place.
+    const stillOurs = () =>
+      correctPanelIsOpen() && correctState === state && ticket === correctRequest;
+
+    try {
+      chrome.runtime.sendMessage(
+        {type: 'omnia-save-check', text: phrase, mode: mode},
+        (response) => {
+          const failure = chrome.runtime.lastError;
+          if (!stillOurs()) {
+            return;
+          }
+          state.saving = false;
+          if (failure || !response || !response.ok) {
+            // `saveError`, NOT `error`. `error` is the fatal channel — `rerenderCorrect`
+            // short-circuits on it and renders the failure ALONE, which for a failed save
+            // would throw away the correction, every explanation the reader had opened, and
+            // the Save button they would retry with, to show one sentence about Anki being
+            // busy. The correction is still correct; only the save failed, so only the save
+            // says so, beside it.
+            state.saveError =
+              (failure && failure.message) || (response && response.error) || 'Unknown error.';
+            rerenderCorrect(true);
+            return;
+          }
+          // Omnia's own sentence: it names the deck, and says when the note type had to be
+          // renamed, which is the one thing about a save nobody can see for themselves.
+          state.saved = (response.result && response.result.summary) || 'Saved to Anki.';
+          rerenderCorrect(true);
+        }
+      );
+    } catch (err) {
+      // Same reasoning as the failure branch: a save that could not even be dispatched must
+      // not take the correction down with it.
+      state.saving = false;
+      state.saveError = String(err);
+      rerenderCorrect(true);
+    }
+  }
+
   /** Select the corrected sentence in the panel, so ⌘C works when the clipboard API will not. */
   function selectCorrectedText() {
     const host = document.getElementById(CORRECT_PANEL_ID);
@@ -1216,7 +1349,9 @@
     // its default and is corrected by the answer.
     const asked = CorrectView.MODES.indexOf(mode) === -1 ? '' : mode;
     const ticket = ++correctRequest;
-    correctState = {text: phrase, mode: asked || 'written', correction: null, open: [], error: ''};
+    correctState = {
+      text: phrase, mode: asked || 'written', correction: null, open: [], error: '', saved: '',
+    };
     showCorrectPanel(CorrectView.pending(correctState.mode), false);
     try {
       chrome.runtime.sendMessage(
