@@ -43,6 +43,24 @@ class FakeElement {
     this.disabled = false;
     this.shadowRoot = null;
     this.isConnected = false;
+    // Enough of a classList for code that marks a control as having succeeded. A Set rather
+    // than a string, because `toggle(name, force)` is what the code calls and re-implementing
+    // its two-argument form over a string is how a harness starts lying.
+    this._classes = new Set();
+    this.classList = {
+      add: (name) => this._classes.add(name),
+      remove: (name) => this._classes.delete(name),
+      contains: (name) => this._classes.has(name),
+      toggle: (name, force) => {
+        const on = force === undefined ? !this._classes.has(name) : !!force;
+        if (on) {
+          this._classes.add(name);
+        } else {
+          this._classes.delete(name);
+        }
+        return on;
+      },
+    };
     this._listeners = {};
   }
 
@@ -1125,6 +1143,137 @@ const tests = {
       /class="omnia-panel correct settled"/.test(correctPanel(page).innerHTML),
       'opening an explanation replayed the entry animation over what was being read'
     );
+  },
+
+  'saving sends the phrase, not the correction': async () => {
+    // Omnia looks it up again (a cache hit) and builds the note itself. Letting a page post
+    // note content into somebody's collection is a different feature with a different risk.
+    const page = loadContentScript();
+    await openCorrect(page);
+    answer(page.chrome, pending(page.chrome, 'omnia-check'), {
+      ok: true, result: correctionPayload('spoken'),
+    });
+    await settle();
+
+    pressCorrect(page, 'data-save', '1');
+    await settle();
+
+    const sent = page.chrome.sent.filter((e) => e.message.type === 'omnia-save-check');
+    assert.strictEqual(sent.length, 1, 'the save never left the page');
+    assert.strictEqual(sent[0].message.text, 'run');
+    assert.strictEqual(sent[0].message.mode, 'spoken', 'the card would record the wrong register');
+    assert.ok(!('fixes' in sent[0].message), 'the page posted note content');
+  },
+
+  'a saved correction says where Anki put it': async () => {
+    const page = loadContentScript();
+    await openCorrect(page);
+    answer(page.chrome, pending(page.chrome, 'omnia-check'), {
+      ok: true, result: correctionPayload(),
+    });
+    await settle();
+    pressCorrect(page, 'data-save', '1');
+
+    answer(page.chrome, pending(page.chrome, 'omnia-save-check'), {
+      ok: true,
+      result: {summary: 'Saved to Omnia::Phrase Check.', deck: 'Omnia::Phrase Check'},
+    });
+    await settle();
+
+    assert.ok(
+      correctPanel(page).innerHTML.indexOf('Saved to Omnia::Phrase Check.') !== -1,
+      'the deck it went to was never said'
+    );
+  },
+
+  'a save that failed says why and lets you try again': async () => {
+    const page = loadContentScript();
+    await openCorrect(page);
+    answer(page.chrome, pending(page.chrome, 'omnia-check'), {
+      ok: true, result: correctionPayload(),
+    });
+    await settle();
+    pressCorrect(page, 'data-save', '1');
+
+    answer(page.chrome, pending(page.chrome, 'omnia-save-check'), {
+      ok: false, error: 'Anki was busy — nothing was saved. Try again.',
+    });
+    await settle();
+
+    assert.ok(
+      correctPanel(page).innerHTML.indexOf('nothing was saved') !== -1,
+      'the reason was swallowed'
+    );
+  },
+
+  'what Anki said survives a redraw': async () => {
+    // The panel re-renders for its own reasons — opening an explanation, for one. A label poked
+    // onto the button, or a sentence written straight into the DOM, is wiped by the next one of
+    // those without anybody noticing, so both live in the panel's state.
+    const page = loadContentScript();
+    await openCorrect(page);
+    answer(page.chrome, pending(page.chrome, 'omnia-check'), {
+      ok: true, result: correctionPayload(),
+    });
+    await settle();
+    pressCorrect(page, 'data-save', '1');
+    answer(page.chrome, pending(page.chrome, 'omnia-save-check'), {
+      ok: true, result: {summary: 'Saved to Omnia::Phrase Check.'},
+    });
+    await settle();
+
+    pressCorrect(page, 'data-why', '0');
+    await settle();
+
+    const html = correctPanel(page).innerHTML;
+    assert.ok(html.indexOf('Saved to Omnia::Phrase Check.') !== -1, 'the sentence was wiped');
+    assert.ok(html.indexOf('>Saved<') !== -1, 'the button forgot it had saved');
+  },
+
+  'switching register clears what the last answer saved': async () => {
+    // A different answer is a different card. A disabled "Saved" button over a correction
+    // nobody has kept would be a lie about the collection.
+    const page = loadContentScript();
+    await openCorrect(page);
+    answer(page.chrome, pending(page.chrome, 'omnia-check'), {
+      ok: true, result: correctionPayload('written'),
+    });
+    await settle();
+    pressCorrect(page, 'data-save', '1');
+    answer(page.chrome, pending(page.chrome, 'omnia-save-check'), {
+      ok: true, result: {summary: 'Saved.'},
+    });
+    await settle();
+
+    pressCorrect(page, 'data-mode', 'spoken');
+    await settle();
+    answer(page.chrome, checkFor(page.chrome, 'run', 'spoken'), {
+      ok: true, result: correctionPayload('spoken'),
+    });
+    await settle();
+
+    const html = correctPanel(page).innerHTML;
+    assert.ok(html.indexOf('>Save to Anki<') !== -1, 'it still claimed to be saved');
+    assert.ok(html.indexOf('Saved.') === -1);
+  },
+
+  'a save answering after the panel is dismissed does not reopen it': async () => {
+    // The note is written either way; this only decides whether anyone is told.
+    const page = loadContentScript();
+    await openCorrect(page);
+    answer(page.chrome, pending(page.chrome, 'omnia-check'), {
+      ok: true, result: correctionPayload(),
+    });
+    await settle();
+    pressCorrect(page, 'data-save', '1');
+    page.document.fire('keydown', {key: 'Escape'});
+
+    answer(page.chrome, pending(page.chrome, 'omnia-save-check'), {
+      ok: true, result: {summary: 'Saved.'},
+    });
+    await settle();
+
+    assert.strictEqual(page.document.getElementById(CORRECT_PANEL_ID), null);
   },
 
   'a correction that arrives after the panel is dismissed does not resurrect it': async () => {

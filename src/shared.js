@@ -194,6 +194,7 @@
   const GENERATE_PATH = '/generate';
   const LOOKUP_PATH = '/lookup';
   const CHECK_PATH = '/check';
+  const SAVE_PATH = '/check/save';
 
   const LOOKUP_UNREACHABLE =
     "Can't reach Anki's lookup service. Make sure Anki is running with Omnia's " +
@@ -289,6 +290,123 @@
    */
   function buildCheckUrl(baseUrl) {
     return normaliseBase(baseUrl) + CHECK_PATH;
+  }
+
+  /**
+   * The URL for saving a correction as a note.
+   * @param {string} baseUrl Where the add-on's lookup service listens.
+   * @return {string} The full POST URL.
+   */
+  function buildSaveUrl(baseUrl) {
+    return normaliseBase(baseUrl) + SAVE_PATH;
+  }
+
+  // How long one save may take. Short, and nothing like the check's budget: this asks Anki to
+  // write a note, which is fast, and the only slow part is waiting for a busy main thread —
+  // which Omnia itself gives up on and answers, so waiting longer here buys nothing.
+  const SAVE_TIMEOUT_MS = 20000;
+  const SAVE_TIMED_OUT =
+    'Anki did not answer within 20 seconds. The correction may not have been saved — ' +
+    'check the deck before saving it again.';
+
+  /**
+   * Turn a /check/save HTTP failure into a sentence naming the remedy.
+   *
+   * 503 is the interesting one and it means two different things: Phrase Check is off, or Anki
+   * was too busy to write. Omnia sends its own sentence for both, which is why the body wins
+   * here — the difference matters and only Omnia knows which happened.
+   *
+   * @param {number} status The HTTP status.
+   * @param {?Object=} payload The parsed error body, when there was one.
+   * @return {string} What went wrong and what to do about it.
+   */
+  function saveErrorMessage(status, payload) {
+    const detail = payload && payload.error ? String(payload.error).trim() : '';
+    const fallbacks = {
+      400: 'Omnia could not read the save request (400).',
+      403:
+        'Omnia refused the request (403) because it did not come from this extension’s ' +
+        'background worker.',
+      // An Omnia that has Phrase Check but predates saving. Not a setting — an update.
+      404: 'The Omnia add-on in Anki cannot save corrections yet.',
+      500: 'Omnia could not save that correction.',
+      502: 'Omnia could not save that correction.',
+      503: 'Phrase Check is switched off, or Anki is busy.',
+    };
+    const remedies = {
+      400: 'This is a bug in the clipper — please report it.',
+      403: 'Reload the extension (or the page) and try again.',
+      404: 'Update it (Tools → Add-ons → Check for Updates), then try again.',
+    };
+    const said = detail || fallbacks[status] || 'Omnia answered ' + status + '.';
+    const remedy = remedies[status] || '';
+    if (!remedy || said.indexOf(remedy) !== -1) {
+      return said;
+    }
+    return (/[.!?…]$/.test(said) ? said : said + '.') + ' ' + remedy;
+  }
+
+  /**
+   * Ask Omnia to keep a correction as a note.
+   *
+   * From the SERVICE WORKER, like the check and for a stronger reason: this one writes to the
+   * user's collection, and the add-on refuses anything a web page could have started.
+   *
+   * @param {string} baseUrl Where the add-on's lookup service listens.
+   * @param {string} text The phrase, as it was checked.
+   * @param {string=} mode The register it was checked in, so the card records the right one.
+   * @return {!Promise<!Object>} `{note_id, deck, note_type, renamed, summary}`.
+   */
+  async function requestSave(baseUrl, text, mode) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), SAVE_TIMEOUT_MS);
+    try {
+      return await sendSave(
+        buildSaveUrl(baseUrl),
+        {text: String(text || ''), mode: String(mode || '')},
+        controller.signal
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * POST one /check/save request and read its answer.
+   * @param {string} url The /check/save URL.
+   * @param {!Object} body The request body (serialised here).
+   * @param {!AbortSignal} signal The timeout's signal.
+   * @return {!Promise<!Object>} The parsed answer.
+   */
+  async function sendSave(url, body, signal) {
+    let response;
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body),
+        signal: signal,
+      });
+    } catch (err) {
+      throw new Error(err && err.name === 'AbortError' ? SAVE_TIMED_OUT : LOOKUP_UNREACHABLE);
+    }
+    if (!response.ok) {
+      let payload = null;
+      try {
+        payload = await response.json();
+      } catch (_e) {
+        payload = null;
+      }
+      throw new Error(saveErrorMessage(response.status, payload));
+    }
+    try {
+      return await response.json();
+    } catch (err) {
+      if (err && err.name === 'AbortError') {
+        throw new Error(SAVE_TIMED_OUT);
+      }
+      throw new Error('Omnia returned a non-JSON answer to the save request.');
+    }
   }
 
   // How long one /check may take. Much shorter than /generate's five minutes, and deliberately:
@@ -585,5 +703,10 @@
     buildCheckUrl: buildCheckUrl,
     checkErrorMessage: checkErrorMessage,
     requestCheck: requestCheck,
+    SAVE_TIMEOUT_MS: SAVE_TIMEOUT_MS,
+    SAVE_TIMED_OUT: SAVE_TIMED_OUT,
+    buildSaveUrl: buildSaveUrl,
+    saveErrorMessage: saveErrorMessage,
+    requestSave: requestSave,
   };
 })(typeof self !== 'undefined' ? self : this);

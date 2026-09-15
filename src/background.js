@@ -17,7 +17,8 @@
 importScripts('shared.js');
 
 const {
-  loadSettings, ankiConnect, buildLookupUrl, requestGenerate, requestCheck, lookupErrorMessage,
+  loadSettings, ankiConnect, buildLookupUrl, requestGenerate, requestCheck, requestSave,
+  lookupErrorMessage,
 } = self.OmniaClipper;
 
 const CONTEXT_MENU_ID = 'omnia-clipper-send-selection';
@@ -390,6 +391,22 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         const settings = await loadSettings();
         const base = settings.lookupUrl || 'http://127.0.0.1:8766';
         const result = await requestCheck(base, message.text, message.mode, message.refresh);
+        sendResponse({ok: true, result: result});
+      } catch (err) {
+        sendResponse({ok: false, error: err && err.message ? err.message : String(err)});
+      }
+    })();
+    return true;  // async sendResponse
+  }
+  if (message && message.type === 'omnia-save-check') {
+    // Keeping a correction as a note. Here rather than in the page for the strongest version of
+    // the usual reason: this one WRITES to the collection, and the add-on refuses anything a
+    // web page could have initiated.
+    (async () => {
+      try {
+        const settings = await loadSettings();
+        const base = settings.lookupUrl || 'http://127.0.0.1:8766';
+        const result = await requestSave(base, message.text, message.mode);
         sendResponse({ok: true, result: result});
       } catch (err) {
         sendResponse({ok: false, error: err && err.message ? err.message : String(err)});

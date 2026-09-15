@@ -80,7 +80,27 @@
    */
   function fixesOf(correction) {
     const fixes = (correction && correction.fixes) || [];
-    return Array.isArray(fixes) ? fixes.filter((fix) => fix && typeof fix === 'object') : [];
+    const kept = Array.isArray(fixes)
+      ? fixes.filter((fix) => fix && typeof fix === 'object')
+      : [];
+    // The panel lists the first few, most important first; Omnia decides how many and sends
+    // every fix regardless, because the same answer is what a saved card is built from. So the
+    // slice is HERE and nothing is dropped upstream.
+    const limit = Number((correction && correction.shown) || 0);
+    return limit > 0 ? kept.slice(0, limit) : kept;
+  }
+
+  /**
+   * How many fixes were left out of the list.
+   * @param {!Object} correction The payload.
+   * @return {number} Zero when everything is on screen.
+   */
+  function hiddenCount(correction) {
+    const all = (correction && correction.fixes) || [];
+    const total = Array.isArray(all)
+      ? all.filter((fix) => fix && typeof fix === 'object').length
+      : 0;
+    return Math.max(0, total - fixesOf(correction).length);
   }
 
   /**
@@ -212,16 +232,24 @@
         header +
         '<p class="omnia-correct-good">This reads correctly as ' +
           escape(MODE_LABELS[mode].toLowerCase()) + '. Nothing to change.</p>' +
-        finalBlock(correction, false)
+        finalBlock(correction, false, state)
       );
     }
 
+    const hidden = hiddenCount(correction);
     return (
       header +
       '<ul class="omnia-correct-fixes">' +
         fixes.map((fix, index) => fixCard(fix, index, open.indexOf(index) !== -1)).join('') +
       '</ul>' +
-      finalBlock(correction, true)
+      // Said out loud rather than silently cut: a list that stops without explanation reads as
+      // the tool having found that many, and the rest are on the card.
+      (hidden
+        ? '<p class="omnia-correct-more">' +
+            hidden + (hidden === 1 ? ' more fix' : ' more fixes') +
+            ' — all of them are kept if you save this.</p>'
+        : '') +
+      finalBlock(correction, true, state)
     );
   }
 
@@ -232,7 +260,7 @@
    * @param {boolean} marked Whether to bold the differences.
    * @return {string}
    */
-  function finalBlock(correction, marked) {
+  function finalBlock(correction, marked, state) {
     // Nothing to show. An `already_good` answer may legitimately omit the rewrite -- nothing was
     // rewritten -- and an empty "Corrected" box above a Copy button that does nothing and says
     // nothing is worse than no box at all.
@@ -252,13 +280,29 @@
     const copy = copyText(correction)
       ? '<button type="button" class="omnia-correct-copy" data-copy="1">Copy</button>'
       : '';
+    // Keeping it is offered whenever there is a correction to keep — including one that was
+    // already correct, which is a perfectly good card to be asked again.
+    // "Saved" is drawn from STATE, not written onto the button afterwards. Everything else in
+    // this panel re-renders — opening an explanation, switching register — and a label poked
+    // into the DOM is wiped by the next one of those without anybody noticing.
+    const kept = !!(state && state.saved);
+    const save = copyText(correction)
+      ? '<button type="button" class="omnia-correct-save' +
+        (kept ? ' omnia-correct-saved' : '') + '" data-save="1"' + (kept ? ' disabled' : '') +
+        '>' + (kept ? 'Saved' : 'Save to Anki') + '</button>'
+      : '';
     return (
       '<div class="omnia-correct-final">' +
         '<div class="omnia-correct-final-head">' +
           '<span class="omnia-correct-final-label">Corrected</span>' +
+          save +
           copy +
         '</div>' +
         '<p class="omnia-correct-text">' + body + '</p>' +
+        // Where a save reports what it did. Empty until then, and hidden while empty — Omnia's
+        // sentence names the deck, and says when the note type had to be renamed, which is the
+        // one thing about a save nobody can see for themselves.
+        '<p class="omnia-correct-said">' + escape((state && state.saved) || '') + '</p>' +
       '</div>'
     );
   }
@@ -329,6 +373,7 @@
     MODES: MODES,
     MODE_LABELS: MODE_LABELS,
     copyText: copyText,
+    hiddenCount: hiddenCount,
     escape: escape,
     failed: failed,
     fixesOf: fixesOf,

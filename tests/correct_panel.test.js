@@ -303,6 +303,81 @@ const tests = {
     assert.ok(html.includes('data-copy'), 'there was something to copy and no button for it');
   },
 
+  // -- the display limit -------------------------------------------------------------------
+  'only the first few fixes are listed': () => {
+    // Omnia decides how many and sends every fix regardless, because the same answer is what a
+    // saved card is built from. The slice is the panel's.
+    const payload = correction();
+    payload.shown = 1;
+
+    const html = view.render(payload, {open: []});
+
+    assert.strictEqual((html.match(/class="omnia-correct-fix"/g) || []).length, 1);
+    assert.ok(html.includes('have went'), 'it listed the wrong one');
+    assert.ok(!html.includes('for buy'), 'it listed one it was told to hold back');
+  },
+
+  'the ones held back are counted out loud': () => {
+    // A list that stops without explanation reads as the tool having found that many.
+    const payload = correction();
+    payload.shown = 1;
+
+    const shown = text(view.render(payload, {open: []}));
+
+    assert.ok(/1 more fix\b/.test(shown), shown);
+    assert.ok(/kept if you save/.test(shown), 'it did not say where the rest went');
+  },
+
+  'nothing held back says nothing': () => {
+    const payload = correction();
+    payload.shown = 99;
+
+    assert.ok(!/more fix/.test(text(view.render(payload, {open: []}))));
+  },
+
+  'a payload with no limit shows everything': () => {
+    // An older add-on, or one that did not say. Showing all of them beats showing none.
+    const payload = correction();
+    delete payload.shown;
+
+    assert.strictEqual(view.fixesOf(payload).length, 2);
+    assert.strictEqual(view.hiddenCount(payload), 0);
+  },
+
+  'the limit never touches the rewrite': () => {
+    const payload = correction();
+    payload.shown = 1;
+
+    const shown = text(view.render(payload, {open: []}));
+
+    assert.ok(shown.includes(payload.rewritten), 'the corrected sentence was cut too');
+  },
+
+  // -- saving ---------------------------------------------------------------------------
+  'a correction offers to be kept': () => {
+    assert.ok(view.render(correction(), {open: []}).includes('data-save'));
+  },
+
+  'an approved sentence can be kept too': () => {
+    // Being right is worth being asked again.
+    const payload = {
+      already_good: true, changed: false, fixes: [], mode: 'written',
+      rewritten: 'I went to the shop.', highlight: [['I went to the shop.', false]],
+    };
+
+    assert.ok(view.render(payload, {open: []}).includes('data-save'));
+  },
+
+  'nothing to keep offers no button': () => {
+    const html = view.render({fixes: [], mode: 'written'}, {open: []});
+
+    assert.ok(!html.includes('data-save'));
+  },
+
+  'there is somewhere for Anki to say where the note went': () => {
+    assert.ok(view.render(correction(), {open: []}).includes('omnia-correct-said'));
+  },
+
   // -- the states before an answer --------------------------------------------------------
   'the pending panel still offers the toggle, so the wait can be redirected': () => {
     const html = view.pending('spoken');
