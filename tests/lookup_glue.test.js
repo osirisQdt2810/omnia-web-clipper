@@ -447,6 +447,19 @@ function correctPanel(page) {
   return host ? host.shadowRoot : null;
 }
 
+/**
+ * The Save button's opening tag, exactly as rendered.
+ *
+ * Asserting `disabled` against the panel's whole innerHTML is not a test: the shadow root
+ * carries the stylesheet too, and that contains `.omnia-correct-save[disabled] { ... }`. A
+ * naive /omnia-correct-save[^>]*disabled/ matches the CSS and passes whatever the button says.
+ */
+function saveButtonTag(page) {
+  const match = /<button[^>]*data-save="1"[^>]*>/.exec(correctPanel(page).innerHTML);
+  assert.ok(match, 'the panel has no Save button');
+  return match[0];
+}
+
 /** Press the control carrying `attribute="value"` in the open correction panel. */
 function pressCorrect(page, attribute, value) {
   const root = correctPanel(page);
@@ -1255,6 +1268,92 @@ const tests = {
     const html = correctPanel(page).innerHTML;
     assert.ok(html.indexOf('>Save to Anki<') !== -1, 'it still claimed to be saved');
     assert.ok(html.indexOf('Saved.') === -1);
+  },
+
+  'a redraw during a save does not re-arm the button': async () => {
+    // "Saving…" used to be written ONTO the button. This subtree is rebuilt whenever an
+    // explanation opens, so the label went with it and the button came back enabled — and the
+    // second press wrote a second note for one phrase. It is the one control in this panel
+    // that writes to the collection, so it is the one where a double-fire costs something.
+    const page = loadContentScript();
+    await openCorrect(page);
+    answer(page.chrome, pending(page.chrome, 'omnia-check'), {
+      ok: true, result: correctionPayload(),
+    });
+    await settle();
+
+    pressCorrect(page, 'data-save', '1');
+    await settle();
+    pressCorrect(page, 'data-why', '0');  // redraw while Anki is still writing
+    await settle();
+
+    const html = correctPanel(page).innerHTML;
+    assert.ok(html.indexOf('Saving…') !== -1, 'the redraw forgot a save was in flight');
+    assert.ok(/disabled/.test(saveButtonTag(page)), 'the button came back live');
+
+    pressCorrect(page, 'data-save', '1');
+    await settle();
+    const sent = page.chrome.sent.filter((e) => e.message.type === 'omnia-save-check');
+    assert.strictEqual(sent.length, 1, 'one phrase became two notes');
+  },
+
+  'a failed save reports beside the correction instead of replacing it': async () => {
+    // `correctState.error` is the FATAL channel — rerenderCorrect short-circuits on it and
+    // renders the failure alone. Routing a failed SAVE through it threw away the fixes, the
+    // explanations the reader had opened, and the button they would retry with, to show one
+    // sentence about Anki being busy.
+    const page = loadContentScript();
+    await openCorrect(page);
+    answer(page.chrome, pending(page.chrome, 'omnia-check'), {
+      ok: true, result: correctionPayload(),
+    });
+    await settle();
+    const before = correctPanel(page).innerHTML;
+    assert.ok(before.indexOf('omnia-correct-fixes') !== -1, 'the fixture had no fixes to lose');
+
+    pressCorrect(page, 'data-save', '1');
+    answer(page.chrome, pending(page.chrome, 'omnia-save-check'), {
+      ok: false, error: 'Anki was busy — nothing was saved. Try again.',
+    });
+    await settle();
+
+    const html = correctPanel(page).innerHTML;
+    assert.ok(html.indexOf('nothing was saved') !== -1, 'the reason was swallowed');
+    assert.ok(html.indexOf('omnia-correct-fixes') !== -1, 'the correction was thrown away');
+    assert.ok(html.indexOf('>Save to Anki<') !== -1, 'there was no button left to retry with');
+    assert.ok(!/disabled/.test(saveButtonTag(page)), 'the retry button was dead');
+  },
+
+  'a save answering after a register switch does not stamp the new correction': async () => {
+    // The ticket covers what the phrase cannot: switching register re-asks about the SAME
+    // phrase, so matching on text alone let this answer write "Saved" onto the spoken state
+    // that replaced it — a disabled Saved button over a correction nobody kept.
+    const page = loadContentScript();
+    await openCorrect(page);
+    answer(page.chrome, pending(page.chrome, 'omnia-check'), {
+      ok: true, result: correctionPayload('written'),
+    });
+    await settle();
+
+    pressCorrect(page, 'data-save', '1');   // in flight...
+    await settle();
+    pressCorrect(page, 'data-mode', 'spoken');  // ...and the question changes underneath it
+    await settle();
+    answer(page.chrome, pending(page.chrome, 'omnia-save-check'), {
+      ok: true, result: {summary: 'Saved to Omnia::Phrase Check.'},
+    });
+    await settle();
+    answer(page.chrome, checkFor(page.chrome, 'run', 'spoken'), {
+      ok: true, result: correctionPayload('spoken'),
+    });
+    await settle();
+
+    const html = correctPanel(page).innerHTML;
+    assert.ok(
+      html.indexOf('Saved to Omnia::Phrase Check.') === -1,
+      'it claimed to have saved the correction that replaced the one it saved'
+    );
+    assert.ok(html.indexOf('>Save to Anki<') !== -1, 'the spoken correction could not be saved');
   },
 
   'a save answering after the panel is dismissed does not reopen it': async () => {

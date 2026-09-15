@@ -254,10 +254,16 @@
   }
 
   /**
-   * The rewritten phrase, with the changed words marked, and a copy button.
+   * The rewritten phrase, with the changed words marked, and the Copy/Save controls.
    *
    * @param {!Object} correction
    * @param {boolean} marked Whether to bold the differences.
+   * @param {{saved: (string|undefined), saving: (boolean|undefined),
+   *          saveError: (string|undefined)}=} state Where the save has got to. Every part of
+   *     it is rendered FROM here rather than poked into the DOM afterwards, because this whole
+   *     subtree is rebuilt whenever an explanation opens or the register changes — a label
+   *     written onto the button is wiped by the next redraw, and a re-enabled Save button is a
+   *     second note in somebody's collection.
    * @return {string}
    */
   function finalBlock(correction, marked, state) {
@@ -282,14 +288,18 @@
       : '';
     // Keeping it is offered whenever there is a correction to keep — including one that was
     // already correct, which is a perfectly good card to be asked again.
-    // "Saved" is drawn from STATE, not written onto the button afterwards. Everything else in
-    // this panel re-renders — opening an explanation, switching register — and a label poked
-    // into the DOM is wiped by the next one of those without anybody noticing.
+    // All three of "Save to Anki" / "Saving…" / "Saved" are drawn from STATE. `Saved` was from
+    // the start; `Saving…` was not, and that was the hole: it was written onto the button at
+    // press time, so opening any explanation mid-save rebuilt this subtree, brought the button
+    // back enabled, and a second press wrote a second note for one phrase.
     const kept = !!(state && state.saved);
+    const saving = !kept && !!(state && state.saving);
+    const label = kept ? 'Saved' : saving ? 'Saving…' : 'Save to Anki';
     const save = copyText(correction)
       ? '<button type="button" class="omnia-correct-save' +
-        (kept ? ' omnia-correct-saved' : '') + '" data-save="1"' + (kept ? ' disabled' : '') +
-        '>' + (kept ? 'Saved' : 'Save to Anki') + '</button>'
+        (kept ? ' omnia-correct-saved' : '') + '" data-save="1"' +
+        (kept || saving ? ' disabled' : '') +
+        '>' + label + '</button>'
       : '';
     return (
       '<div class="omnia-correct-final">' +
@@ -302,7 +312,15 @@
         // Where a save reports what it did. Empty until then, and hidden while empty — Omnia's
         // sentence names the deck, and says when the note type had to be renamed, which is the
         // one thing about a save nobody can see for themselves.
-        '<p class="omnia-correct-said">' + escape((state && state.saved) || '') + '</p>' +
+        //
+        // A FAILED save reports here too, rather than replacing the panel: the correction is
+        // what the user asked for and it is still correct, so throwing away six fixes and the
+        // explanations they had opened to show one sentence about Anki being busy costs them
+        // the answer and the button they would retry with.
+        (state && state.saveError
+          ? '<p class="omnia-correct-said omnia-correct-said-bad">' +
+              escape(state.saveError) + '</p>'
+          : '<p class="omnia-correct-said">' + escape((state && state.saved) || '') + '</p>') +
       '</div>'
     );
   }
