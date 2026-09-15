@@ -202,7 +202,11 @@
    * The whole panel for one correction.
    *
    * @param {!Object} correction A /check payload.
-   * @param {!Object=} state `{open: Set|Array of fix indexes whose reason is showing}`.
+   * @param {{open: (Set|Array|undefined), saved: (string|undefined),
+   *          saving: (boolean|undefined), saveError: (string|undefined)}=} state
+   *     What is on screen beyond the answer itself: which fixes have their reason showing, and
+   *     where the save has got to. Every part of it is rendered FROM here rather than written
+   *     into the DOM afterwards, because this subtree is rebuilt on every redraw.
    * @return {string} Markup for the panel body.
    */
   function render(correction, state) {

@@ -450,6 +450,88 @@ const tests = {
   },
 };
 
+// --- the panel's own stylesheet ------------------------------------------------------
+//
+// A shadow root blocks the PAGE's styles, not the UA's. There is no bare-element `button` rule
+// in either sheet, so every control has to declare its own box or it paints as a native button
+// — Arial 13.3px, 2px outset border, grey fill — next to flat 11px outlined siblings. That is
+// exactly what shipped for "Save to Anki", and nothing in this suite could see it: the markup
+// was right, the text was right, only the rendering was wrong.
+
+/** The two stylesheets content.js injects into the correction panel's shadow root. */
+function panelCss() {
+  const source = fs.readFileSync(path.join(SRC, 'content.js'), 'utf8');
+  const grab = (name) => {
+    const open = 'const ' + name + ' = `';
+    const start = source.indexOf(open) + open.length;
+    return source.slice(start, source.indexOf('`;', start));
+  };
+  // Comments stripped: they sit between rules, so a rule preceded by one is not preceded by
+  // `}` and the selector matcher below misses it — which it did, silently falling through to
+  // the dark-mode rule of the same name and reporting the wrong declarations.
+  return (grab('PANEL_CSS') + grab('CORRECT_CSS')).replace(/\/\*[\s\S]*?\*\//g, '');
+}
+
+/**
+ * The declarations of the first rule whose selector is exactly `.name`.
+ *
+ * "Exactly" matters: `.omnia-correct-save` and `.omnia-correct-save.omnia-correct-saved` are
+ * different rules, and only the first is the base box.
+ */
+function baseRule(css, name) {
+  const match = new RegExp('(^|[,}])\\s*\\.' + name + '\\s*\\{([^}]*)\\}').exec(css);
+  return match ? match[2] : '';
+}
+
+Object.assign(tests, {
+  'there is no bare button rule to fall back on': () => {
+    // The premise of the test below. If one is ever added, this stops being load-bearing —
+    // and whoever adds it should see that spelled out rather than infer it.
+    const css = panelCss();
+    assert.ok(
+      !/(^|[,}])\s*button\s*\{/.test(css),
+      'a bare `button {}` rule exists now; the per-control rules below may be redundant'
+    );
+  },
+
+  'every button in the panel declares its own box': () => {
+    const css = panelCss();
+    const buttons = [
+      'omnia-correct-save',
+      'omnia-correct-copy',
+      'omnia-correct-why-btn',
+      'omnia-correct-mode',
+    ];
+    for (const name of buttons) {
+      const rule = baseRule(css, name);
+      assert.ok(rule, name + ' has no base rule at all');
+      for (const property of ['font', 'background', 'border']) {
+        assert.ok(
+          rule.indexOf(property) !== -1,
+          name + ' does not set `' + property + '`, so the UA stylesheet decides it'
+        );
+      }
+    }
+  },
+
+  'the dark theme restyles every bordered control': () => {
+    // A control left out keeps its light border on a dark panel. `Save to Anki` was omitted.
+    const css = panelCss();
+    // lastIndexOf, not indexOf: PANEL_CSS has a dark block of its own and CORRECT_CSS is
+    // concatenated after it, so slicing from the FIRST one swallows every light rule in
+    // between — and the check passed with the control removed from the dark list entirely.
+    const dark = css.slice(css.lastIndexOf('prefers-color-scheme: dark'));
+    for (const name of [
+      'omnia-correct-save',
+      'omnia-correct-copy',
+      'omnia-correct-why-btn',
+      'omnia-correct-mode',
+    ]) {
+      assert.ok(dark.indexOf(name) !== -1, name + ' is not restyled for dark mode');
+    }
+  },
+});
+
 let failed = 0;
 const names = Object.keys(tests);
 

@@ -270,7 +270,20 @@
        for a failed check — the correction stays on screen and the Save button stays live, so
        this has to read as "that one press did not work", not as "the answer is wrong". */
     .omnia-correct-said.omnia-correct-said-bad { color: #a35b00; }
-    .omnia-correct-save { margin-right: 6px; }
+    /* Its own box, like every other control in these two sheets — there is no generic
+       bare-element button rule anywhere in them. A shadow root blocks the PAGE's styles, not
+       the UA's, and a button's UA font/background/border/appearance are non-inherited
+       declarations that beat the panel's inherited font. Without this the headline control of
+       the panel paints as a native grey button in Arial with an outset border, flush against
+       the flat outlined Copy button beside it. */
+    .omnia-correct-save {
+      font: inherit; font-size: 11px; cursor: pointer;
+      background: transparent; color: #6b727c;
+      border: 1px solid #dfe3e8; border-radius: 7px; padding: 2px 9px;
+      margin-right: 6px;
+      transition: color 0.15s ease, border-color 0.15s ease;
+    }
+    .omnia-correct-save:hover:not([disabled]) { border-color: #1f9d63; color: #1f9d63; }
     .omnia-correct-save.omnia-correct-saved {
       border-color: #1f9d63; color: #1f9d63; font-weight: 600;
     }
@@ -290,7 +303,8 @@
     .omnia-correct-error { color: #a35b00; line-height: 1.5; }
     @media (prefers-color-scheme: dark) {
       .omnia-correct-fix { background: rgba(38,42,49,0.75); border-color: #363b44; }
-      .omnia-correct-mode, .omnia-correct-why-btn, .omnia-correct-copy { border-color: #363b44; }
+      .omnia-correct-mode, .omnia-correct-why-btn, .omnia-correct-copy,
+      .omnia-correct-save { border-color: #363b44; }
       .omnia-correct-mode-on { color: #ffffff; border-color: #1f9d63; }
       .omnia-correct-why { color: #b9bfc8; border-top-color: #363b44; }
       .omnia-correct-final { border-top-color: #363b44; }
