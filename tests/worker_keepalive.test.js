@@ -91,7 +91,6 @@ const test = (name, fn) => tests.push({name, fn});
 for (const [type, message, body] of [
   ['omnia-check', {type: 'omnia-check', text: 'what is the stages', mode: ''}, {rewritten: 'x'}],
   ['omnia-generate', {type: 'omnia-generate', noteId: 1, fields: ['Definition']}, {results: []}],
-  ['omnia-save-check', {type: 'omnia-save-check', text: 'a phrase', mode: 'written'}, {ok: true}],
 ]) {
   test(`${type}: the worker keeps itself alive while the add-on is slow`, async () => {
     const w = worker();
@@ -130,7 +129,7 @@ test('a check allows for a model that has to wake up first', () => {
 
 test("the page never shows Chrome's raw port-closed text", () => {
   const source = fs.readFileSync(path.join(SRC, 'content.js'), 'utf8');
-  const fn = source.match(/  function workerFailureText\(failure\) \{[\s\S]*?\n  \}/);
+  const fn = source.match(/  function workerFailureText\([^)]*\) \{[\s\S]*?\n  \}/);
   assert.ok(fn, 'workerFailureText moved');
   const sandbox = {};
   vm.createContext(sandbox);
@@ -142,6 +141,29 @@ test("the page never shows Chrome's raw port-closed text", () => {
   assert.ok(/try again/i.test(text), text);
   assert.strictEqual(sandbox.workerFailureText({message: 'Something else.'}), 'Something else.');
   assert.strictEqual(sandbox.workerFailureText(null), '');
+});
+
+test('a save that lost its answer is never told to try again', () => {
+  // A closed port means the extension stopped listening, not that Omnia stopped: the note may
+  // already be written, and pressing Save again would make one phrase two notes.
+  const source = fs.readFileSync(path.join(SRC, 'content.js'), 'utf8');
+  const fn = source.match(/  function workerFailureText\([^)]*\) \{[\s\S]*?\n  \}/);
+  const sandbox = {};
+  vm.createContext(sandbox);
+  vm.runInContext(fn[0] + '\nthis.workerFailureText = workerFailureText;', sandbox);
+  const text = sandbox.workerFailureText(
+    {message: 'The message port closed before a response was received.'}, true);
+  assert.ok(!/try again/i.test(text), text);
+  assert.ok(/check the deck/i.test(text), text);
+  assert.ok(/workerFailureText\(failure, true\)/.test(source), 'the save path must use the write variant');
+});
+
+test('a save is not wrapped: it gives up inside the idle window anyway', async () => {
+  const w = worker();
+  w.send({type: 'omnia-save-check', text: 'a phrase', mode: 'written'});
+  await tick();
+  assert.strictEqual(w.intervals.size, 0);
+  assert.ok(w.clipper.SAVE_TIMEOUT_MS < 30000);
 });
 
 (async () => {

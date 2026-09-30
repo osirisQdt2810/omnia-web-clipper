@@ -351,6 +351,8 @@ async function keepAliveWhile(work) {
     }
   }, KEEPALIVE_MS);
   try {
+    // `await`, not a bare return: returning the promise would run the `finally` at once and
+    // stop the beat before the request it exists for had even started.
     return await work();
   } finally {
     clearInterval(beat);
@@ -444,7 +446,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       try {
         const settings = await loadSettings();
         const base = settings.lookupUrl || 'http://127.0.0.1:8766';
-        const result = await keepAliveWhile(() => requestSave(base, message.text, message.mode));
+        // No keep-alive: a save gives up after SAVE_TIMEOUT_MS (20 s), inside Chrome's 30 s.
+        const result = await requestSave(base, message.text, message.mode);
         sendResponse({ok: true, result: result});
       } catch (err) {
         sendResponse({ok: false, error: err && err.message ? err.message : String(err)});

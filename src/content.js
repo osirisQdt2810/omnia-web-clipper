@@ -403,19 +403,28 @@
    *
    * "The message port closed before a response was received." is Chrome saying the background
    * worker ended before it answered — which a reader cannot act on, and which the worker now
-   * prevents for slow requests (background.js::keepAliveWhile). If it still happens, the honest
-   * cause is that the worker was restarted mid-request, and the remedy is simply to ask again.
+   * prevents for slow requests (background.js::keepAliveWhile). It can still happen when the
+   * worker is restarted mid-request (an update, the options page's Reload).
+   *
+   * A closed port says the extension stopped LISTENING, not that Omnia stopped working — so for a
+   * request that writes, the answer may have been lost after the write happened. "Try again" is
+   * right for a read and wrong for a write, where it turns one saved phrase into two notes.
    *
    * @param {?{message: string}} failure chrome.runtime.lastError.
+   * @param {boolean=} wrote Whether the request writes to the collection.
    * @return {string}
    */
-  function workerFailureText(failure) {
+  function workerFailureText(failure, wrote) {
     const raw = failure && failure.message ? String(failure.message) : '';
-    if (/message port closed|receiving end does not exist/i.test(raw)) {
-      return 'The extension stopped waiting before Omnia answered. Try again — if your model ' +
-          'runs on a server that sleeps when idle, the first request can take a minute or two.';
+    if (!/message port closed|receiving end does not exist/i.test(raw)) {
+      return raw;
     }
-    return raw;
+    if (wrote) {
+      return 'The extension stopped waiting before Omnia answered. The correction may already ' +
+          'have been saved — check the deck before saving it again.';
+    }
+    return 'The extension stopped waiting before Omnia answered. Try again — if your model ' +
+        'runs on a server that sleeps when idle, the first request can take a minute or two.';
   }
 
   /** Detach on a dead context: remove our UI and stop the selection handlers firing. */
@@ -966,7 +975,7 @@
           return;
         }
         if (failure) {
-          showPanel(LookupView.renderMessage('Lookup unavailable', failure.message), word);
+          showPanel(LookupView.renderMessage('Lookup unavailable', workerFailureText(failure)), word);
           return;
         }
         if (!response || !response.ok) {
@@ -1311,7 +1320,8 @@
             // busy. The correction is still correct; only the save failed, so only the save
             // says so, beside it.
             state.saveError =
-              workerFailureText(failure) || (response && response.error) || 'Unknown error.';
+              workerFailureText(failure, true) || (response && response.error) ||
+              'Unknown error.';
             rerenderCorrect(true);
             return;
           }
