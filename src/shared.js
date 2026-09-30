@@ -409,15 +409,15 @@
     }
   }
 
-  // How long one /check may take. Much shorter than /generate's five minutes, and deliberately:
-  // this is ONE model call on a phrase the user has selected and is watching a spinner for,
-  // where /generate is several calls filling a whole note and may reasonably be left running.
-  // A minute and a half is past the point where anything is coming back, and waiting longer
-  // just leaves the panel lying about being busy.
-  const CHECK_TIMEOUT_MS = 90000;
+  // How long one /check may take. Shorter than /generate's five minutes, and deliberately: this
+  // is ONE model call on a phrase the user is watching a spinner for. But not ninety seconds any
+  // more — a self-hosted model that sleeps when idle takes 85-100 s just to wake, so the first
+  // check after a pause was cut off a few seconds before its answer arrived. Three minutes covers
+  // a wake-up plus the answer.
+  const CHECK_TIMEOUT_MS = 180000;
   const CHECK_TIMED_OUT =
-    'Omnia did not finish checking that phrase within 90 seconds. The model may be slow or ' +
-    'unreachable — try again, or pick a shorter phrase.';
+    'Omnia did not finish checking that phrase within 3 minutes. The model may be unreachable, ' +
+    'or a self-hosted one may still be starting up — try again in a minute.';
 
   /**
    * Turn a /check HTTP failure into a sentence naming the remedy.

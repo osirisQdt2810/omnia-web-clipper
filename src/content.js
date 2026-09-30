@@ -398,6 +398,26 @@
     }
   }
 
+  /**
+   * What to tell the reader when the extension's own messaging failed, instead of Chrome's text.
+   *
+   * "The message port closed before a response was received." is Chrome saying the background
+   * worker ended before it answered — which a reader cannot act on, and which the worker now
+   * prevents for slow requests (background.js::keepAliveWhile). If it still happens, the honest
+   * cause is that the worker was restarted mid-request, and the remedy is simply to ask again.
+   *
+   * @param {?{message: string}} failure chrome.runtime.lastError.
+   * @return {string}
+   */
+  function workerFailureText(failure) {
+    const raw = failure && failure.message ? String(failure.message) : '';
+    if (/message port closed|receiving end does not exist/i.test(raw)) {
+      return 'The extension stopped waiting before Omnia answered. Try again — if your model ' +
+          'runs on a server that sleeps when idle, the first request can take a minute or two.';
+    }
+    return raw;
+  }
+
   /** Detach on a dead context: remove our UI and stop the selection handlers firing. */
   function handleContextGone() {
     if (contextGone) {
@@ -1291,7 +1311,7 @@
             // busy. The correction is still correct; only the save failed, so only the save
             // says so, beside it.
             state.saveError =
-              (failure && failure.message) || (response && response.error) || 'Unknown error.';
+              workerFailureText(failure) || (response && response.error) || 'Unknown error.';
             rerenderCorrect(true);
             return;
           }
@@ -1373,7 +1393,7 @@
           }
           if (failure || !response || !response.ok) {
             correctState.error =
-              (failure && failure.message) ||
+              workerFailureText(failure) ||
               (response && response.error) ||
               'Unknown error.';
             rerenderCorrect();
