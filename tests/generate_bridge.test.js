@@ -82,6 +82,7 @@ function runWorker(options) {
       onMessage: {addListener: function (fn) { listeners.push(fn); }},
       reload: function () {},
       openOptionsPage: function () {},
+      getPlatformInfo: function (cb) { if (cb) cb({}); },
     },
     storage: {
       sync: area('sync', stored),
@@ -102,6 +103,9 @@ function runWorker(options) {
     console: console,
     setTimeout: setTimeout,
     clearTimeout: clearTimeout,
+    // The worker keeps itself alive during a slow request (background.js::keepAliveWhile).
+    setInterval: setInterval,
+    clearInterval: clearInterval,
     URL: URL,
     URLSearchParams: URLSearchParams,
     // requestGenerate budgets a /generate the way the desktop clipper does, and needs a real

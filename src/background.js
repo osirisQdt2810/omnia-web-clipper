@@ -323,6 +323,42 @@ async function lookupWord(word, baseUrl) {
   return response.json();
 }
 
+/**
+ * How often to prove the worker is busy while it waits on the add-on. Under Chrome's 30 s.
+ */
+const KEEPALIVE_MS = 20000;
+
+/**
+ * Run `work` without Chrome ending this worker halfway through it.
+ *
+ * Chrome ends an MV3 service worker after about 30 seconds without an event or an extension API
+ * call, and a pending `fetch` counts as neither. A phrase check against a model that has to start
+ * first — a self-hosted server that sleeps when idle takes 85-100 s to wake — outlived the worker:
+ * Chrome closed the message port, and the page showed Chrome's own "The message port closed
+ * before a response was received." instead of the correction. Any extension API call resets the
+ * idle timer, so a cheap one runs every {@link KEEPALIVE_MS} until `work` settles.
+ *
+ * @param {function(): !Promise<T>} work
+ * @return {!Promise<T>}
+ * @template T
+ */
+async function keepAliveWhile(work) {
+  const beat = setInterval(() => {
+    try {
+      chrome.runtime.getPlatformInfo(() => void chrome.runtime.lastError);
+    } catch (_e) {
+      // Nothing to do: the beat is a courtesy to Chrome, never a reason to fail the request.
+    }
+  }, KEEPALIVE_MS);
+  try {
+    // `await`, not a bare return: returning the promise would run the `finally` at once and
+    // stop the beat before the request it exists for had even started.
+    return await work();
+  } finally {
+    clearInterval(beat);
+  }
+}
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message && message.type === 'omnia-media') {
     // A lookup result names its media files but cannot carry them; the panel asks for the bytes
@@ -373,7 +409,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       try {
         const settings = await loadSettings();
         const base = settings.lookupUrl || 'http://127.0.0.1:8766';
-        const result = await requestGenerate(base, message.noteId, message.fields);
+        const result = await keepAliveWhile(
+          () => requestGenerate(base, message.noteId, message.fields)
+        );
         sendResponse({ok: true, result: result});
       } catch (err) {
         sendResponse({ok: false, error: err && err.message ? err.message : String(err)});
@@ -390,7 +428,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       try {
         const settings = await loadSettings();
         const base = settings.lookupUrl || 'http://127.0.0.1:8766';
-        const result = await requestCheck(base, message.text, message.mode, message.refresh);
+        const result = await keepAliveWhile(
+          () => requestCheck(base, message.text, message.mode, message.refresh)
+        );
         sendResponse({ok: true, result: result});
       } catch (err) {
         sendResponse({ok: false, error: err && err.message ? err.message : String(err)});
@@ -406,6 +446,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       try {
         const settings = await loadSettings();
         const base = settings.lookupUrl || 'http://127.0.0.1:8766';
+        // No keep-alive: a save gives up after SAVE_TIMEOUT_MS (20 s), inside Chrome's 30 s.
         const result = await requestSave(base, message.text, message.mode);
         sendResponse({ok: true, result: result});
       } catch (err) {
